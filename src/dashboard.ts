@@ -1412,7 +1412,8 @@ canvas{display:block;width:100%;height:185px}
         if (mx >= hgt.x && mx <= hgt.x+hgt.w && my >= hgt.y && my <= hgt.y+hgt.h) { found = hgt; break; }
       }
       if (found) {
-        tip.innerHTML = '<b>' + found.project + '</b> — ' + fmt(found.ms)
+        const valueText = found.valueText != null ? found.valueText : fmt(found.ms);
+        tip.innerHTML = '<b>' + found.project + '</b> — ' + valueText
           + '<br><span style="opacity:.7">' + found.date + '</span>';
         tip.style.display = 'block';
         tip.style.left = (e.clientX + 12) + 'px';
@@ -1573,6 +1574,7 @@ canvas{display:block;width:100%;height:185px}
     drawGrid(ctx, P, pw, ph, 4, maxC, maxCum, muted,
       v => '$'+v.toFixed(2), v => '$'+v.toFixed(1));
 
+    const hits = [];
     for (let i = 0; i < n; i++) {
       const models = aiDays[i].models || [];
       if (!models.length) continue;
@@ -1593,6 +1595,10 @@ canvas{display:block;width:100%;height:185px}
           ctx.lineTo(x+barW,y+bh); ctx.lineTo(x,y+bh); ctx.lineTo(x,y+r);
           ctx.quadraticCurveTo(x,y,x+r,y); ctx.fill();
         } else { ctx.fillRect(x,y,barW,bh); }
+        hits.push({ x, y, w: barW, h: bh,
+          project: m.displayName || m.model,
+          valueText: '$' + m.cost.toFixed(2),
+          date: aiDays[i].date });
         yBottom -= bh;
       }
     }
@@ -1605,6 +1611,7 @@ canvas{display:block;width:100%;height:185px}
     drawCumLine(ctx, pts, lineColor);
     drawXLabels(ctx, aiDays, P, pw, ph, muted);
     drawAxisLines(ctx, P, pw, ph);
+    attachChartTooltip(canvasId || 'chart-ai', hits);
 
     const legendEl = document.getElementById(legendId || 'ai-legend');
     if (legendEl) {
