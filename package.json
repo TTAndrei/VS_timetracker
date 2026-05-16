@@ -1,13 +1,22 @@
 {
-  "name": "vscode-time-tracker",
-  "displayName": "VS Code Time Tracker",
+  "name": "tt-timetracker",
+  "displayName": "TT-TimeTracker by Andrei",
   "description": "Track active coding time, project costs, goals and AI usage",
-  "version": "0.4.0",
+  "version": "0.5.10",
   "publisher": "AndreiAkirov",
   "license": "MIT",
   "icon": "images/icon.png",
-  "categories": ["Other", "Visualization"],
-  "keywords": ["time tracking", "productivity", "pomodoro", "goals", "cost tracking"],
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "time tracking",
+    "productivity",
+    "pomodoro",
+    "goals",
+    "cost tracking"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/AndreiAkirov/vscode-time-tracker"
@@ -68,15 +77,39 @@
       {
         "command": "vscodeTracker.pomodoroStop",
         "title": "VSCode Tracker: Stop Pomodoro"
+      },
+      {
+        "command": "vscodeTracker.toggleLanguage",
+        "title": "VSCode Tracker: Language (English / Español)"
       }
     ],
     "configuration": {
       "title": "VS Code Time Tracker",
       "properties": {
+        "vscodeTracker.language": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "en",
+            "es"
+          ],
+          "enumDescriptions": [
+            "Follow VS Code display language",
+            "English",
+            "Español"
+          ],
+          "description": "Dashboard language. 'auto' follows the VS Code UI language."
+        },
         "vscodeTracker.idleThresholdSeconds": {
           "type": "number",
           "default": 300,
-          "description": "Seconds of inactivity before session ends"
+          "description": "Seconds of inactivity before session ends (also used as a heuristic for break detection)"
+        },
+        "vscodeTracker.unfocusedGraceSeconds": {
+          "type": "number",
+          "default": 900,
+          "description": "Seconds the window can stay unfocused (watching an AI run, reading docs/browser) before the session ends. Higher = fewer fragmented sessions."
         },
         "vscodeTracker.logFilePath": {
           "type": "string",
@@ -91,7 +124,13 @@
         "vscodeTracker.currency": {
           "type": "string",
           "default": "EUR",
-          "enum": ["EUR", "USD", "GBP", "CHF", "JPY"],
+          "enum": [
+            "EUR",
+            "USD",
+            "GBP",
+            "CHF",
+            "JPY"
+          ],
           "description": "Currency for cost tracking"
         },
         "vscodeTracker.dailyGoalHours": {
@@ -162,7 +201,11 @@
                 "description": "Hex color for this model in charts (e.g. '#10a37f')"
               }
             },
-            "required": ["name", "input_per_mtok", "output_per_mtok"]
+            "required": [
+              "name",
+              "input_per_mtok",
+              "output_per_mtok"
+            ]
           }
         }
       }
@@ -172,11 +215,15 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "release": "npm version patch --no-git-tag-version && npm run compile && vsce package"
   },
   "devDependencies": {
     "@types/node": "^18.19.130",
     "@types/vscode": "^1.74.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^1.6.1"
   }
 }

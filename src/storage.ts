@@ -14,6 +14,8 @@ export interface Segment {
   notes?: string;
   tags?: string[];
   pomodoroCount?: number;
+  gitBranch?: string;
+  gitCommit?: string;
 }
 
 export interface PomodoroSession {
@@ -63,6 +65,57 @@ function getManualAIPath(): string {
   return path.join(getTrackerDir(), 'ai-manual.json');
 }
 
+// Day bucket keyed by the user's LOCAL calendar date, not UTC. Mixing UTC
+// (toISOString) with local midnight put post-midnight work in the wrong day.
+export function localDay(d: Date | string): string {
+  const dt = typeof d === 'string' ? new Date(d) : d;
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const day = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+export function parseLocalDay(key: string): Date {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+// A session that spans local midnight must be attributed per calendar day,
+// otherwise its whole duration lands on a single day's bar and disagrees
+// with the per-day card. Splits [start,end] into one interval per local day.
+export function splitByLocalDay(
+  start: Date | string,
+  end: Date | string
+): Array<{ start: string; end: string; duration_ms: number }> {
+  const s = typeof start === 'string' ? new Date(start) : new Date(start.getTime());
+  const e = typeof end === 'string' ? new Date(end) : new Date(end.getTime());
+  const parts: Array<{ start: string; end: string; duration_ms: number }> = [];
+  let cur = s;
+  while (localDay(cur) !== localDay(e)) {
+    const nextMidnight = new Date(
+      cur.getFullYear(), cur.getMonth(), cur.getDate() + 1, 0, 0, 0, 0
+    );
+    parts.push({
+      start: cur.toISOString(),
+      end: nextMidnight.toISOString(),
+      duration_ms: nextMidnight.getTime() - cur.getTime(),
+    });
+    cur = nextMidnight;
+  }
+  parts.push({
+    start: cur.toISOString(),
+    end: e.toISOString(),
+    duration_ms: e.getTime() - cur.getTime(),
+  });
+  return parts;
+}
+
+export function writeFileAtomic(filePath: string, data: string): void {
+  const tmp = filePath + '.tmp';
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, filePath);
+}
+
 export function loadSegments(): Segment[] {
   const filePath = getLogFilePath();
   if (!fs.existsSync(filePath)) return [];
@@ -76,7 +129,7 @@ export function loadSegments(): Segment[] {
 export function appendSegment(segment: Segment): void {
   const segments = loadSegments();
   segments.push(segment);
-  fs.writeFileSync(getLogFilePath(), JSON.stringify(segments, null, 2));
+  writeFileAtomic(getLogFilePath(), JSON.stringify(segments, null, 2));
 }
 
 export function loadProjectConfigs(): ProjectConfig[] {
@@ -92,7 +145,7 @@ export function loadProjectConfigs(): ProjectConfig[] {
 export function saveProjectConfig(cfg: ProjectConfig): void {
   const configs = loadProjectConfigs().filter(c => c.project !== cfg.project);
   configs.push(cfg);
-  fs.writeFileSync(getProjectConfigPath(), JSON.stringify(configs, null, 2));
+  writeFileAtomic(getProjectConfigPath(), JSON.stringify(configs, null, 2));
 }
 
 export function getProjectConfig(project: string): ProjectConfig | undefined {
@@ -112,17 +165,17 @@ export function loadManualAIEntries(): ManualAIEntry[] {
 export function appendManualAIEntry(entry: ManualAIEntry): void {
   const entries = loadManualAIEntries();
   entries.push(entry);
-  fs.writeFileSync(getManualAIPath(), JSON.stringify(entries, null, 2));
+  writeFileAtomic(getManualAIPath(), JSON.stringify(entries, null, 2));
 }
 
 export function exportCsv(): string {
   const segments = loadSegments();
-  const lines = ['project,projectPath,start,end,duration_h,language,tags,notes'];
+  const lines = ['project,projectPath,start,end,duration_h,language,tags,notes,git_branch,git_commit'];
   for (const s of segments) {
     const dh = (s.duration_ms / 3600000).toFixed(4);
     const tags = (s.tags ?? []).join(';');
     const notes = (s.notes ?? '').replace(/"/g, '""');
-    lines.push(`"${s.project}","${s.projectPath}","${s.start}","${s.end}",${dh},"${s.language ?? ''}","${tags}","${notes}"`);
+    lines.push(`"${s.project}","${s.projectPath}","${s.start}","${s.end}",${dh},"${s.language ?? ''}","${tags}","${notes}","${s.gitBranch ?? ''}","${s.gitCommit ?? ''}"`);
   }
   return lines.join('\n');
 }
@@ -142,7 +195,7 @@ export function readPomodoro(): PomodoroSession[] {
 }
 
 export function appendPomodoro(entry: PomodoroSession): void {
-  const today = new Date().toISOString().substring(0, 10);
+  const today = localDay(new Date());
   const sessions = readPomodoro();
   const existing = sessions.find(s => s.date === today && s.project === entry.project);
   if (existing) {
@@ -151,7 +204,7 @@ export function appendPomodoro(entry: PomodoroSession): void {
   } else {
     sessions.push(entry);
   }
-  fs.writeFileSync(getPomodoroPath(), JSON.stringify(sessions, null, 2));
+  writeFileAtomic(getPomodoroPath(), JSON.stringify(sessions, null, 2));
 }
 
 export function updateLastSegmentMeta(notes: string, tags: string[], pomodoroCount?: number): void {
@@ -161,7 +214,7 @@ export function updateLastSegmentMeta(notes: string, tags: string[], pomodoroCou
   if (notes) last.notes = notes;
   if (tags.length > 0) last.tags = tags;
   if (pomodoroCount !== undefined) last.pomodoroCount = pomodoroCount;
-  fs.writeFileSync(getLogFilePath(), JSON.stringify(segments, null, 2));
+  writeFileAtomic(getLogFilePath(), JSON.stringify(segments, null, 2));
 }
 
 export function getTodayTotal(): number {

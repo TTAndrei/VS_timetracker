@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { appendPomodoro } from './storage';
+import { appendPomodoro, localDay } from './storage';
 
 export class PomodoroTimer implements vscode.Disposable {
   private workMs: number;
@@ -16,9 +16,9 @@ export class PomodoroTimer implements vscode.Disposable {
     this.workMs = workMinutes * 60 * 1000;
     this.breakMs = breakMinutes * 60 * 1000;
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
-    this.statusBarItem.command = 'vscodeTracker.pomodoroStop';
-    this.statusBarItem.text = '$(clock) Pomodoro';
-    this.statusBarItem.tooltip = 'Click para detener | vscodeTracker.pomodoroStart para iniciar';
+    this.statusBarItem.command = 'vscodeTracker.pomodoroStart';
+    this.statusBarItem.text = '🍅 Pomodoro';
+    this.statusBarItem.tooltip = 'Click para iniciar Pomodoro';
     this.statusBarItem.show();
   }
 
@@ -58,7 +58,7 @@ export class PomodoroTimer implements vscode.Disposable {
 
     if (this.phase === 'work') {
       this.completedThisRun++;
-      const today = new Date().toISOString().substring(0, 10);
+      const today = localDay(new Date());
       appendPomodoro({
         project: this.currentProject,
         projectPath: this.currentPath,
@@ -104,7 +104,7 @@ export class PomodoroTimer implements vscode.Disposable {
 
   getCompletedToday(project: string): number {
     const { readPomodoro } = require('./storage');
-    const today = new Date().toISOString().substring(0, 10);
+    const today = localDay(new Date());
     return (readPomodoro() as import('./storage').PomodoroSession[])
       .filter(s => s.date === today && s.project === project)
       .reduce((acc, s) => acc + s.completedPomodoros, 0);
@@ -112,8 +112,9 @@ export class PomodoroTimer implements vscode.Disposable {
 
   private updateStatusBar(): void {
     if (this.phase === 'idle') {
-      this.statusBarItem.text = '$(clock) Pomodoro';
-      this.statusBarItem.tooltip = 'Iniciar: vscodeTracker.pomodoroStart';
+      this.statusBarItem.text = '🍅 Pomodoro';
+      this.statusBarItem.tooltip = 'Click para iniciar Pomodoro';
+      this.statusBarItem.command = 'vscodeTracker.pomodoroStart';
       return;
     }
     if (!this.phaseStart) return;
@@ -124,6 +125,7 @@ export class PomodoroTimer implements vscode.Disposable {
     const s = Math.floor((remaining % 60000) / 1000);
     const mm = String(m).padStart(2, '0');
     const ss = String(s).padStart(2, '0');
+    this.statusBarItem.command = 'vscodeTracker.pomodoroStop';
     if (this.phase === 'work') {
       this.statusBarItem.text = `$(stop-circle) ${mm}:${ss} 🍅`;
       this.statusBarItem.tooltip = `Pomodoro — ${this.currentProject} | Click para detener`;

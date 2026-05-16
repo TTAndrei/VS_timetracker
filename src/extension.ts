@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import { TimeTracker } from './tracker';
 import { StatusBarManager } from './statusBar';
 import { PomodoroTimer } from './pomodoro';
@@ -7,14 +6,19 @@ import { openDashboard } from './dashboard';
 import {
   getLogFilePath, exportCsv, loadSegments,
   getProjectConfig, saveProjectConfig, appendManualAIEntry,
-  updateLastSegmentMeta
+  updateLastSegmentMeta, writeFileAtomic, localDay
 } from './storage';
 
 let tracker: TimeTracker;
 let statusBar: StatusBarManager;
 let pomodoro: PomodoroTimer;
+let output: vscode.OutputChannel;
 
 export function activate(context: vscode.ExtensionContext): void {
+  output = vscode.window.createOutputChannel('TT-TimeTracker');
+  context.subscriptions.push(output);
+
+  try {
   tracker = new TimeTracker();
   statusBar = new StatusBarManager(tracker);
   const cfg = vscode.workspace.getConfiguration('vscodeTracker');
@@ -29,7 +33,7 @@ export function activate(context: vscode.ExtensionContext): void {
     pomodoro,
 
     vscode.commands.registerCommand('vscodeTracker.showDashboard', () => {
-      openDashboard(context);
+      openDashboard(context, tracker);
     }),
 
     vscode.commands.registerCommand('vscodeTracker.configureProject', async () => {
@@ -122,7 +126,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const dateStr = await vscode.window.showInputBox({
         title: 'Log AI — Fecha',
         prompt: 'Fecha en formato YYYY-MM-DD',
-        value: new Date().toISOString().substring(0, 10),
+        value: localDay(new Date()),
         validateInput: v => /^\d{4}-\d{2}-\d{2}$/.test(v) ? null : 'Formato YYYY-MM-DD requerido',
       });
       if (dateStr === undefined) return;
@@ -141,7 +145,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const segments = loadSegments().filter(s => new Date(s.start) < today);
-      fs.writeFileSync(getLogFilePath(), JSON.stringify(segments, null, 2));
+      writeFileAtomic(getLogFilePath(), JSON.stringify(segments, null, 2));
       vscode.window.showInformationMessage('Stats de hoy eliminados.');
     }),
 
@@ -152,14 +156,14 @@ export function activate(context: vscode.ExtensionContext): void {
         'Eliminar todo'
       );
       if (choice === 'Eliminar todo') {
-        fs.writeFileSync(getLogFilePath(), '[]');
+        writeFileAtomic(getLogFilePath(), '[]');
         vscode.window.showInformationMessage('Todos los datos eliminados.');
       }
     }),
 
     vscode.commands.registerCommand('vscodeTracker.exportCsv', () => {
       const csvPath = getLogFilePath().replace('.json', '.csv');
-      fs.writeFileSync(csvPath, exportCsv());
+      writeFileAtomic(csvPath, exportCsv());
       vscode.window.showInformationMessage(`CSV exportado: ${csvPath}`);
     }),
 
@@ -208,8 +212,36 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('vscodeTracker.pomodoroStop', () => {
       pomodoro.stop();
+    }),
+
+    vscode.commands.registerCommand('vscodeTracker.toggleLanguage', async () => {
+      const config = vscode.workspace.getConfiguration('vscodeTracker');
+      const current = config.get<string>('language') ?? 'auto';
+      const items: Array<vscode.QuickPickItem & { value: string }> = [
+        { label: 'Auto', description: 'Sigue el idioma de VS Code', value: 'auto' },
+        { label: 'English', value: 'en' },
+        { label: 'Español', value: 'es' },
+      ];
+      const picked = await vscode.window.showQuickPick(
+        items.map(i => ({ ...i, picked: i.value === current })),
+        { title: 'Dashboard language / Idioma del panel', placeHolder: `Actual: ${current}` }
+      );
+      if (!picked) return;
+      await config.update('language', picked.value, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(
+        `Idioma: ${picked.label}. Reabre el dashboard o pulsa ↻ para aplicar.`
+      );
     })
   );
+  } catch (err) {
+    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    output.appendLine('[activate] ' + msg);
+    vscode.window.showErrorMessage(
+      'TT-TimeTracker failed to activate: ' +
+      (err instanceof Error ? err.message : String(err)) +
+      ' (see Output > TT-TimeTracker)'
+    );
+  }
 }
 
 export function deactivate(): void {

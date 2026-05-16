@@ -1,48 +1,59 @@
-# VS Code Time Tracker
+# TT-TimeTracker
 
 Track your coding time, project costs, daily goals, and AI usage — all inside VS Code.
 
-![Version](https://img.shields.io/visual-studio-marketplace/v/AndreiAkirov.vscode-time-tracker)
-![Installs](https://img.shields.io/visual-studio-marketplace/i/AndreiAkirov.vscode-time-tracker)
-![License](https://img.shields.io/badge/license-MIT-blue)
+Dashboard available in **English** and **Español** (auto-detects the VS Code UI language; switch any time with the 🌐 button or the `Language` command).
+
+---
+
+## Screenshots
+
+### Overview
+![Overview](images/overview.png)
+
+### AI usage
+![AI usage](images/AI.png)
+
+### Configuration
+![Configuration](images/config.png)
 
 ---
 
 ## Features
 
-### ⏱ Automatic Time Tracking
+### Automatic Time Tracking
 Tracks active coding time per project. Detects idle periods and stops the timer automatically. No manual start/stop required.
 
-### 📊 Dashboard
+### Dashboard
 Full overview of all your projects with:
 - Daily and weekly time
 - Progress bars toward your goals
 - Streaks and language breakdown
 - Cost estimates based on hourly rate
 
-### 🍅 Pomodoro Timer
+### Pomodoro Timer
 Built-in Pomodoro timer integrated with the tracker:
 - Configurable work/break durations (default 25/5 min)
 - Status bar countdown
 - Session count per project
 - Notifications on phase completion
 
-### 🎯 Goals & Streaks
+### Goals & Streaks
 Set daily and weekly hour goals per project or globally. Get notified when you hit your target. Streak counter rewards consistent coding days.
 
-### 💰 Cost Tracking
+### Cost Tracking
 Set an hourly rate per project (or globally). Dashboard shows earnings per project and totals.
 
-### 🤖 AI Usage Tracking
+### AI Usage Tracking
 Parses Claude Code logs to show token usage and cost per model — useful for tracking AI expenses alongside coding time.
 
-### 📝 Session Notes & Tags
+### Session Notes & Tags
 Add notes and tags to sessions (e.g. `bug`, `feature`, `meeting`). Filter the dashboard by tag to analyze time by task type.
 
-### 📦 Export
+### Export
 Export all session data as **CSV** or **JSON** for billing, reporting, or external analysis.
 
-### 🗄 Archive
+### Archive
 Archive completed or inactive projects. Restore at any time from the Archive tab.
 
 ---
@@ -71,6 +82,7 @@ Archive completed or inactive projects. Restore at any time from the Archive tab
 | `VSCode Tracker: Log AI Usage` | Manually log AI model usage |
 | `VSCode Tracker: Reset Today Stats` | Clear today's sessions |
 | `VSCode Tracker: Reset All Data` | Delete all tracking data |
+| `VSCode Tracker: Language (English / Español)` | Switch the dashboard language |
 
 ---
 
@@ -78,7 +90,9 @@ Archive completed or inactive projects. Restore at any time from the Archive tab
 
 | Setting | Default | Description |
 |---|---|---|
+| `vscodeTracker.language` | `auto` | Dashboard language: `auto`, `en`, `es` |
 | `vscodeTracker.idleThresholdSeconds` | `300` | Seconds of inactivity before session ends |
+| `vscodeTracker.unfocusedGraceSeconds` | `900` | Seconds the window can stay unfocused before the session ends |
 | `vscodeTracker.dailyGoalHours` | `0` | Global daily goal in hours (0 = disabled) |
 | `vscodeTracker.weeklyGoalHours` | `0` | Global weekly goal in hours (0 = disabled) |
 | `vscodeTracker.defaultHourlyRate` | `0` | Default hourly rate (0 = disabled) |
@@ -88,6 +102,7 @@ Archive completed or inactive projects. Restore at any time from the Archive tab
 | `vscodeTracker.breakReminderHours` | `2` | Break reminder after N continuous hours (0 = disabled) |
 | `vscodeTracker.enableLanguageTracking` | `true` | Track time by file language |
 | `vscodeTracker.enableAITracking` | `true` | Parse Claude Code logs for AI cost tracking |
+| `vscodeTracker.aiCustomModels` | `[]` | Custom AI model pricing for non-Claude models |
 | `vscodeTracker.promptForNotes` | `false` | Auto-prompt for notes when a session ends |
 
 ---

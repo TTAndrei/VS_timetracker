@@ -1,12 +1,14 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { getStrings, Strings } from './i18n';
 import {
   loadSegments, exportCsv as exportCsvData, getLogFilePath,
   loadProjectConfigs, saveProjectConfig, getProjectConfig,
-  readPomodoro,
+  readPomodoro, localDay, parseLocalDay, splitByLocalDay,
   Segment, ProjectConfig
 } from './storage';
-import { loadAISessions, buildAIDailyData, AISession, AIModelUsage, AIStackedDay, CustomModelConfig } from './aiTracker';
+import { loadAIDataFull, buildAIDailyData, encodeProjectPath, AISession, AIModelUsage, AIStackedDay, CustomModelConfig } from './aiTracker';
+import { TimeTracker } from './tracker';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +42,15 @@ interface SessionRow {
   pomodoroCount: number;
 }
 
+interface ProjectAIStats {
+  totalCost: number;
+  todayCost: number;
+  weekCost: number;
+  tokIn: number;
+  tokOut: number;
+  dailyData: AIStackedDay[];
+}
+
 interface DashboardData {
   stats: ProjectStats[];
   archivedStats: ProjectStats[];
@@ -63,6 +74,8 @@ interface DashboardData {
   pomodoroByProject: Record<string, number>;
   recentSessions: SessionRow[];
   perProjectSessions: Record<string, SessionRow[]>;
+  perProjectAI: Record<string, ProjectAIStats>;
+  aiProjectRanking: Array<{ project: string; color: string; cost: number; tokIn: number; tokOut: number }>;
 }
 
 // ── Palette ────────────────────────────────────────────────────────────────
@@ -106,7 +119,7 @@ function getDailyBreakdown(segments: Segment[], project?: string): DailyEntry[] 
   const filtered = project ? segments.filter(s => s.project === project) : segments;
   const byDate = new Map<string, number>();
   for (const seg of filtered) {
-    const date = seg.start.substring(0, 10);
+    const date = localDay(seg.start);
     byDate.set(date, (byDate.get(date) ?? 0) + seg.duration_ms);
   }
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -114,15 +127,15 @@ function getDailyBreakdown(segments: Segment[], project?: string): DailyEntry[] 
     const r: DailyEntry[] = [];
     for (let i = 29; i >= 0; i--) {
       const d = new Date(today); d.setDate(d.getDate() - i);
-      r.push({ date: d.toISOString().substring(0, 10), ms: 0 });
+      r.push({ date: localDay(d), ms: 0 });
     }
     return r;
   }
-  const first = new Date(Array.from(byDate.keys()).sort()[0]); first.setHours(0, 0, 0, 0);
+  const first = parseLocalDay(Array.from(byDate.keys()).sort()[0]); first.setHours(0, 0, 0, 0);
   const result: DailyEntry[] = [];
   const cur = new Date(first);
   while (cur <= today) {
-    const ds = cur.toISOString().substring(0, 10);
+    const ds = localDay(cur);
     result.push({ date: ds, ms: byDate.get(ds) ?? 0 });
     cur.setDate(cur.getDate() + 1);
   }
@@ -132,7 +145,7 @@ function getDailyBreakdown(segments: Segment[], project?: string): DailyEntry[] 
 function buildStackedDaily(segments: Segment[], colorMap: Map<string, string>): StackedDay[] {
   const byDate = new Map<string, Map<string, number>>();
   for (const seg of segments) {
-    const date = seg.start.substring(0, 10);
+    const date = localDay(seg.start);
     if (!byDate.has(date)) byDate.set(date, new Map());
     const dm = byDate.get(date)!;
     dm.set(seg.project, (dm.get(seg.project) ?? 0) + seg.duration_ms);
@@ -142,15 +155,15 @@ function buildStackedDaily(segments: Segment[], colorMap: Map<string, string>): 
     const r: StackedDay[] = [];
     for (let i = 29; i >= 0; i--) {
       const d = new Date(today); d.setDate(d.getDate() - i);
-      r.push({ date: d.toISOString().substring(0, 10), slices: [] });
+      r.push({ date: localDay(d), slices: [] });
     }
     return r;
   }
-  const first = new Date(Array.from(byDate.keys()).sort()[0]); first.setHours(0, 0, 0, 0);
+  const first = parseLocalDay(Array.from(byDate.keys()).sort()[0]); first.setHours(0, 0, 0, 0);
   const result: StackedDay[] = [];
   const cur = new Date(first);
   while (cur <= today) {
-    const ds = cur.toISOString().substring(0, 10);
+    const ds = localDay(cur);
     const dm = byDate.get(ds) ?? new Map();
     const slices = Array.from(dm.entries())
       .filter(([, ms]) => ms > 0)
@@ -181,7 +194,7 @@ function getLangBreakdown(segments: Segment[], project?: string): LangEntry[] {
 }
 
 function calcStreak(stackedDaily: StackedDay[]): number {
-  const today = new Date().toISOString().substring(0, 10);
+  const today = localDay(new Date());
   let streak = 0;
   for (let i = stackedDaily.length - 1; i >= 0; i--) {
     const e = stackedDaily[i];
@@ -193,8 +206,26 @@ function calcStreak(stackedDaily: StackedDay[]): number {
   return streak;
 }
 
-function buildData(): DashboardData {
+function buildData(tracker?: TimeTracker): DashboardData {
   const segments = loadSegments();
+
+  // Inject the current live session so the dashboard shows real-time data
+  if (tracker) {
+    const liveDuration = tracker.getSessionDuration();
+    if (liveDuration > 5000) {
+      const liveStart = new Date(Date.now() - liveDuration);
+      const liveEnd = new Date();
+      for (const p of splitByLocalDay(liveStart, liveEnd)) {
+        segments.push({
+          project: tracker.getCurrentProject(),
+          projectPath: tracker.getCurrentPath(),
+          start: p.start,
+          end: p.end,
+          duration_ms: p.duration_ms,
+        });
+      }
+    }
+  }
   const configs = loadProjectConfigs();
   const cfgMap = new Map<string, ProjectConfig>(configs.map(c => [c.project, c]));
   const vsConfig = vscode.workspace.getConfiguration('vscodeTracker');
@@ -270,10 +301,15 @@ function buildData(): DashboardData {
   let aiSessions: AISession[] = [];
   let aiDailyData: AIStackedDay[] = [];
   let aiModelStats: AIModelUsage[] = [];
+  let perProjectAI: Record<string, ProjectAIStats> = {};
+  let aiProjectRanking: Array<{ project: string; color: string; cost: number; tokIn: number; tokOut: number }> = [];
+
   if (aiEnabled) {
     try {
-      aiSessions = loadAISessions(customModels);
+      const aiData = loadAIDataFull(customModels);
+      aiSessions = aiData.sessions;
       aiDailyData = buildAIDailyData(aiSessions);
+
       const modelAgg = new Map<string, AIModelUsage>();
       for (const session of aiSessions) {
         for (const m of session.models) {
@@ -288,6 +324,33 @@ function buildData(): DashboardData {
         }
       }
       aiModelStats = Array.from(modelAgg.values()).sort((a, b) => b.cost_usd - a.cost_usd);
+
+      // Per-project AI: match tracked projects to Claude Code project dirs
+      const todayStr2 = localDay(new Date());
+      const wkStart2 = new Date(); wkStart2.setDate(wkStart2.getDate() - wkStart2.getDay()); wkStart2.setHours(0, 0, 0, 0);
+
+      for (const s of allStats) {
+        if (!s.projectPath) continue;
+        const encoded = encodeProjectPath(s.projectPath).toLowerCase();
+        let projectSessions: AISession[] = [];
+        for (const [dirName, sessions] of aiData.byProjectDir.entries()) {
+          if (dirName.toLowerCase() === encoded) { projectSessions = sessions; break; }
+        }
+        if (projectSessions.length === 0) continue;
+
+        const totalCost = projectSessions.reduce((a, ss) => a + ss.cost_usd, 0);
+        const todayCost = projectSessions.find(ss => ss.date === todayStr2)?.cost_usd ?? 0;
+        const weekCost = projectSessions.filter(ss => new Date(ss.date) >= wkStart2).reduce((a, ss) => a + ss.cost_usd, 0);
+        const tokIn = projectSessions.reduce((a, ss) => a + ss.tokens_in, 0);
+        const tokOut = projectSessions.reduce((a, ss) => a + ss.tokens_out, 0);
+        const dailyData = buildAIDailyData(projectSessions);
+
+        perProjectAI[s.project] = { totalCost, todayCost, weekCost, tokIn, tokOut, dailyData };
+        if (totalCost > 0) {
+          aiProjectRanking.push({ project: s.project, color: s.color, cost: totalCost, tokIn, tokOut });
+        }
+      }
+      aiProjectRanking.sort((a, b) => b.cost - a.cost);
     } catch { /* ignore */ }
   }
 
@@ -301,7 +364,7 @@ function buildData(): DashboardData {
   const allTags = Array.from(tagSet).sort();
 
   // Pomodoro by project (today)
-  const todayStr = new Date().toISOString().substring(0, 10);
+  const todayStr = localDay(new Date());
   const pomodoroByProject: Record<string, number> = {};
   try {
     for (const p of readPomodoro().filter(p => p.date === todayStr)) {
@@ -312,7 +375,7 @@ function buildData(): DashboardData {
   // Recent sessions (last 50 overall, last 20 per project)
   const toRow = (seg: Segment): SessionRow => ({
     project: seg.project,
-    date: seg.start.substring(0, 10),
+    date: localDay(seg.start),
     duration_ms: seg.duration_ms,
     tags: seg.tags ?? [],
     notes: seg.notes ?? '',
@@ -323,7 +386,7 @@ function buildData(): DashboardData {
   for (const s of allStats) {
     perProjectSessions[s.project] = segments
       .filter(seg => seg.project === s.project)
-      .slice(-20).reverse().map(toRow);
+      .slice(-10).reverse().map(toRow);
   }
 
   return {
@@ -349,16 +412,18 @@ function buildData(): DashboardData {
     pomodoroByProject,
     recentSessions,
     perProjectSessions,
+    perProjectAI,
+    aiProjectRanking,
   };
 }
 
 // ── HTML generation ────────────────────────────────────────────────────────
 
-function projectCards(stats: ProjectStats[], totalAll_ms: number, pomodoroByProject: Record<string, number>, isArchived = false): string {
+function projectCards(stats: ProjectStats[], totalAll_ms: number, pomodoroByProject: Record<string, number>, t: Strings, isArchived = false): string {
   if (stats.length === 0) {
     return isArchived
-      ? '<p class="empty">No hay proyectos archivados.</p>'
-      : '<p class="empty">Sin datos aún. Empieza a codear.</p>';
+      ? `<p class="empty">${t.archiveEmpty}</p>`
+      : `<p class="empty">${t.noProjects}</p>`;
   }
   const totalAll = totalAll_ms || stats.reduce((a, s) => a + s.total_ms, 0) || 1;
   return stats.map((s, i) => {
@@ -368,19 +433,19 @@ function projectCards(stats: ProjectStats[], totalAll_ms: number, pomodoroByProj
     const weekPct  = s.weeklyGoal_ms > 0 ? Math.min(100, Math.round(s.week_ms / s.weeklyGoal_ms * 100)) : -1;
     const goalBars = [
       todayPct >= 0 ? `<div class="card-goal-row">
-        <div class="goal-label"><span>Meta hoy</span><span>${fmt(s.today_ms)} / ${fmt(s.dailyGoal_ms)} (${todayPct}%)</span></div>
+        <div class="goal-label"><span>${t.cardGoalDaily}</span><span>${fmt(s.today_ms)} / ${fmt(s.dailyGoal_ms)} (${todayPct}%)</span></div>
         <div class="goal-bar"><div class="goal-fill ${todayPct >= 100 ? 'done' : ''}" style="width:${todayPct}%"></div></div>
       </div>` : '',
       weekPct >= 0 ? `<div class="card-goal-row">
-        <div class="goal-label"><span>Meta semana</span><span>${fmt(s.week_ms)} / ${fmt(s.weeklyGoal_ms)} (${weekPct}%)</span></div>
+        <div class="goal-label"><span>${t.cardGoalWeekly}</span><span>${fmt(s.week_ms)} / ${fmt(s.weeklyGoal_ms)} (${weekPct}%)</span></div>
         <div class="goal-bar"><div class="goal-fill ${weekPct >= 100 ? 'done' : ''}" style="width:${weekPct}%"></div></div>
       </div>` : '',
     ].join('');
     const pomCount = pomodoroByProject[s.project] ?? 0;
-    const pomoBadge = pomCount > 0 ? `<span class="pomo-badge" title="${pomCount} pomodoros hoy">🍅${pomCount}</span>` : '';
+    const pomoBadge = pomCount > 0 ? `<span class="pomo-badge" title="${pomCount} ${t.cardPomoToday}">${pomCount} ${t.cardPomoToday}</span>` : '';
     const archiveBtn = isArchived
-      ? `<div class="archive-btn" onclick="unarchiveProject(${i},event)" title="Desarchivar">↩</div>`
-      : `<div class="archive-btn" onclick="archiveProject(${i},event)" title="Archivar proyecto">✓</div>`;
+      ? `<div class="archive-btn" onclick="unarchiveProject(${i},event)" title="${t.unarchiveBtn}">↩</div>`
+      : `<div class="archive-btn" onclick="archiveProject(${i},event)" title="${t.archiveBtn}">✓</div>`;
     return `
 <div class="card" id="${isArchived ? 'arc-card-' : 'card-'}${i}" onclick="${isArchived ? '' : `showDetail(${i})`}" style="${isArchived ? 'cursor:default;opacity:.8' : ''}">
   <div class="card-top">
@@ -395,9 +460,9 @@ function projectCards(stats: ProjectStats[], totalAll_ms: number, pomodoroByProj
   </div>
   <div class="card-path">${escHtml(s.projectPath || '—')}</div>
   <div class="card-stats">
-    <div class="cs"><div class="cs-label">Hoy</div><div class="cs-val">${fmt(s.today_ms)}</div></div>
-    <div class="cs"><div class="cs-label">Semana</div><div class="cs-val">${fmt(s.week_ms)}</div></div>
-    <div class="cs"><div class="cs-label">Total</div><div class="cs-val cs-total">${fmt(s.total_ms)}</div></div>
+    <div class="cs"><div class="cs-label">${t.pillToday}</div><div class="cs-val">${fmt(s.today_ms)}</div></div>
+    <div class="cs"><div class="cs-label">${t.pillWeek}</div><div class="cs-val">${fmt(s.week_ms)}</div></div>
+    <div class="cs"><div class="cs-label">${t.pillTotal}</div><div class="cs-val cs-total">${fmt(s.total_ms)}</div></div>
   </div>
   ${goalBars ? `<div class="card-goals">${goalBars}</div>` : ''}
   <div class="card-bar"><div class="card-bar-fill" style="width:${pct}%;background:${escHtml(s.color)}"></div></div>
@@ -405,7 +470,7 @@ function projectCards(stats: ProjectStats[], totalAll_ms: number, pomodoroByProj
   }).join('');
 }
 
-function settingsTab(data: DashboardData): string {
+function settingsTab(data: DashboardData, t: Strings): string {
   const dailyH = data.dailyGoal_ms > 0 ? (data.dailyGoal_ms / 3600000).toFixed(1) : '';
   const weeklyH = data.weeklyGoal_ms > 0 ? (data.weeklyGoal_ms / 3600000).toFixed(1) : '';
   const currencies = ['EUR', 'USD', 'GBP', 'CHF', 'JPY'];
@@ -423,49 +488,50 @@ function settingsTab(data: DashboardData): string {
       <td><select class="cfg-select" id="cur-${i}">${currOpts(s.currency)}</select></td>
       <td><input class="cfg-input" type="number" min="0" step="0.5" value="${dh}" placeholder="—" id="dgoal-${i}" style="width:55px"></td>
       <td><input class="cfg-input" type="number" min="0" step="1" value="${wh}" placeholder="—" id="wgoal-${i}" style="width:55px"></td>
-      <td><button class="ghost cfg-save-btn" onclick="saveProjectGoals(${i})">Guardar</button></td>
+      <td><button class="ghost cfg-save-btn" onclick="saveProjectGoals(${i})">${t.settingsSaveBtn}</button></td>
     </tr>`;
   }).join('');
 
   return `<div style="height:8px"></div>
-  <div class="section-title">Metas globales</div>
+  <div class="section-title">${t.settingsTitle}</div>
   <div class="cfg-card" style="margin-bottom:14px">
     <div class="cfg-row">
-      <label class="cfg-label">Meta diaria (h)</label>
+      <label class="cfg-label">${t.settingsDailyGoal}</label>
       <input class="cfg-input" type="number" min="0" step="0.5" id="g-daily" value="${dailyH}" placeholder="0">
     </div>
     <div class="cfg-row">
-      <label class="cfg-label">Meta semanal (h)</label>
+      <label class="cfg-label">${t.settingsWeeklyGoal}</label>
       <input class="cfg-input" type="number" min="0" step="1" id="g-weekly" value="${weeklyH}" placeholder="0">
     </div>
     <div class="cfg-row">
-      <label class="cfg-label">Tarifa por defecto (€/h)</label>
+      <label class="cfg-label">${t.settingsGlobalRate}</label>
       <input class="cfg-input" type="number" min="0" step="1" id="g-rate" value="${data.defaultRate || ''}" placeholder="0">
     </div>
     <div class="cfg-row">
-      <label class="cfg-label">Moneda</label>
+      <label class="cfg-label">${t.settingsCurrency}</label>
       <select class="cfg-select" id="g-currency">${currOpts(data.currency)}</select>
     </div>
     <div style="margin-top:10px">
-      <button onclick="saveGlobalConfig()">Guardar global</button>
-      <span id="g-saved" style="margin-left:8px;font-size:11px;color:var(--vscode-charts-green,#4caf50);display:none">✓ Guardado</span>
+      <button onclick="saveGlobalConfig()">${t.settingsSaveBtn}</button>
+      <span id="g-saved" style="margin-left:8px;font-size:11px;color:var(--vscode-charts-green,#4caf50);display:none">✓ ${t.settingsSaved}</span>
     </div>
   </div>
 
-  <div class="section-title">Proyectos activos</div>
+  <div class="section-title">${t.settingsProjectsTitle}</div>
   <div style="overflow-x:auto">
     <table class="model-table" style="min-width:550px">
-      <thead><tr><th>Proyecto</th><th>€/h</th><th>Moneda</th><th>Meta/día (h)</th><th>Meta/sem (h)</th><th></th></tr></thead>
+      <thead><tr><th>Proyecto</th><th>${t.settingsProjectRate}</th><th>${t.settingsProjectCurrency}</th><th>${t.settingsProjectDailyGoal}</th><th>${t.settingsProjectWeeklyGoal}</th><th></th></tr></thead>
       <tbody>${projectRows}</tbody>
     </table>
   </div>`;
 }
 
-export function generateDashboardHtml(): string {
-  const data = buildData();
-  const cards = projectCards(data.stats, data.totalAll_ms, data.pomodoroByProject, false);
-  const arcCards = projectCards(data.archivedStats, data.totalAll_ms, data.pomodoroByProject, true);
-  const settingsHtml = settingsTab(data);
+export function generateDashboardHtml(lang: string = 'en', tracker?: TimeTracker): string {
+  const t = getStrings(lang);
+  const data = buildData(tracker);
+  const cards = projectCards(data.stats, data.totalAll_ms, data.pomodoroByProject, t, false);
+  const arcCards = projectCards(data.archivedStats, data.totalAll_ms, data.pomodoroByProject, t, true);
+  const settingsHtml = settingsTab(data, t);
   const dataJson = JSON.stringify(data);
 
   const todayCost = fmtCost(data.totalToday_ms, data.defaultRate, data.currency);
@@ -474,14 +540,14 @@ export function generateDashboardHtml(): string {
   const weekGoalPct  = data.weeklyGoal_ms > 0 ? Math.min(100, Math.round(data.totalWeek_ms / data.weeklyGoal_ms * 100)) : -1;
 
   const aiTotalCost = data.aiSessions.reduce((a, s) => a + s.cost_usd, 0);
-  const aiTodayStr = new Date().toISOString().substring(0, 10);
+  const aiTodayStr = localDay(new Date());
   const aiToday = data.aiSessions.find(s => s.date === aiTodayStr)?.cost_usd ?? 0;
   const wkStart = new Date(); wkStart.setDate(wkStart.getDate() - wkStart.getDay()); wkStart.setHours(0,0,0,0);
   const aiWeek = data.aiSessions.filter(s => new Date(s.date) >= wkStart).reduce((a, s) => a + s.cost_usd, 0);
   const aiTokIn  = data.aiSessions.reduce((a, s) => a + s.tokens_in, 0);
   const aiTokOut = data.aiSessions.reduce((a, s) => a + s.tokens_out, 0);
   const codingH  = data.totalAll_ms / 3600000;
-  const aiRatio  = codingH > 0 && aiTotalCost > 0 ? `$${(aiTotalCost / codingH).toFixed(2)}/h código` : '—';
+  const aiRatio  = codingH > 0 && aiTotalCost > 0 ? `$${(aiTotalCost / codingH).toFixed(2)}${t.perHourCode}` : '—';
 
   const modelTableRows = data.aiModelStats.map(m => `
 <tr>
@@ -497,9 +563,11 @@ export function generateDashboardHtml(): string {
   ).join('');
 
   const arcCount = data.archivedStats.length;
+  const otherLang = lang.startsWith('es') ? 'en' : 'es';
+  const otherLangName = getStrings(otherLang).langName;
 
   return `<!DOCTYPE html>
-<html lang="es">
+<html lang="${lang}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -644,17 +712,18 @@ canvas{display:block;width:100%;height:185px}
 <!-- ════════ OVERVIEW ════════ -->
 <div class="page active" id="pg-overview">
   <div class="topbar">
-    <h1>⏱ Time Tracker</h1>
+    <h1>${t.title}</h1>
     <div class="tab-row">
-      <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
-      <button class="tab-btn" onclick="switchTab('settings')">⚙ Config</button>
-      ${data.aiEnabled ? '<button class="tab-btn" onclick="switchTab(\'ai\')">🤖 IA</button>' : ''}
-      <button class="tab-btn" onclick="switchTab('archived')">📦 Archivados${arcCount > 0 ? ` (${arcCount})` : ''}</button>
+      <button class="tab-btn active" onclick="switchTab('overview')">${t.tabOverview}</button>
+      <button class="tab-btn" onclick="switchTab('settings')">${t.tabConfig}</button>
+      ${data.aiEnabled ? `<button class="tab-btn" onclick="switchTab('ai')">${t.tabAI}</button>` : ''}
+      <button class="tab-btn" onclick="switchTab('archived')">${t.tabArchived}${arcCount > 0 ? ` (${arcCount})` : ''}</button>
     </div>
     <div class="actions">
-      <button class="ghost" onclick="doRefresh()" title="Actualizar">↻</button>
-      <button class="ghost" onclick="doExportJson()" title="Exportar JSON">⬇ JSON</button>
-      <button onclick="doExport()">⬇ CSV</button>
+      <button class="ghost" onclick="setLang('${otherLang}')" title="${otherLangName}">🌐 ${otherLangName}</button>
+      <button class="ghost" onclick="doRefresh()" title="${t.detailRefreshBtn}">${t.detailRefreshBtn}</button>
+      <button class="ghost" onclick="doExportJson()">${t.exportJsonBtn}</button>
+      <button onclick="doExport()">${t.exportCsvBtn}</button>
     </div>
   </div>
 
@@ -662,31 +731,31 @@ canvas{display:block;width:100%;height:185px}
   <div class="scrollable" id="tab-overview">
     <div style="height:8px"></div>
     <div class="pills">
-      <div class="pill"><div class="pl">Hoy</div><div class="pv">${fmt(data.totalToday_ms)}</div>${todayCost ? `<div class="ps">${todayCost}</div>` : ''}</div>
-      <div class="pill"><div class="pl">Semana</div><div class="pv">${fmt(data.totalWeek_ms)}</div>${weekCost ? `<div class="ps">${weekCost}</div>` : ''}</div>
-      <div class="pill blue"><div class="pl">Total</div><div class="pv">${fmt(data.totalAll_ms)}</div></div>
-      ${data.streak > 0 ? `<div class="pill accent"><div class="pl">Racha</div><div class="pv">🔥 ${data.streak}</div><div class="ps">días</div></div>` : ''}
+      <div class="pill"><div class="pl">${t.pillToday}</div><div class="pv">${fmt(data.totalToday_ms)}</div>${todayCost ? `<div class="ps">${todayCost}</div>` : ''}</div>
+      <div class="pill"><div class="pl">${t.pillWeek}</div><div class="pv">${fmt(data.totalWeek_ms)}</div>${weekCost ? `<div class="ps">${weekCost}</div>` : ''}</div>
+      <div class="pill blue"><div class="pl">${t.pillTotal}</div><div class="pv">${fmt(data.totalAll_ms)}</div></div>
+      ${data.streak > 0 ? `<div class="pill accent"><div class="pl">${t.pillStreak}</div><div class="pv">${data.streak}</div><div class="ps">${t.pillStreakDays}</div></div>` : ''}
     </div>
 
     ${todayGoalPct >= 0 || weekGoalPct >= 0 ? `<div class="goal-section">
       ${todayGoalPct >= 0 ? `<div class="goal-row">
-        <div class="goal-label"><span>Meta diaria (global)</span><span>${fmt(data.totalToday_ms)} / ${fmt(data.dailyGoal_ms)} (${todayGoalPct}%)</span></div>
+        <div class="goal-label"><span>${t.goalDailyGlobal}</span><span>${fmt(data.totalToday_ms)} / ${fmt(data.dailyGoal_ms)} (${todayGoalPct}%)</span></div>
         <div class="goal-bar"><div class="goal-fill ${todayGoalPct >= 100 ? 'done' : ''}" style="width:${todayGoalPct}%"></div></div>
       </div>` : ''}
       ${weekGoalPct >= 0 ? `<div class="goal-row">
-        <div class="goal-label"><span>Meta semanal (global)</span><span>${fmt(data.totalWeek_ms)} / ${fmt(data.weeklyGoal_ms)} (${weekGoalPct}%)</span></div>
+        <div class="goal-label"><span>${t.goalWeeklyGlobal}</span><span>${fmt(data.totalWeek_ms)} / ${fmt(data.weeklyGoal_ms)} (${weekGoalPct}%)</span></div>
         <div class="goal-bar"><div class="goal-fill ${weekGoalPct >= 100 ? 'done' : ''}" style="width:${weekGoalPct}%"></div></div>
       </div>` : ''}
     </div>` : ''}
 
     <div class="chart-wrap">
       <div class="chart-title">
-        <span>Actividad diaria por proyecto</span>
+        <span>${t.chartDailyByProject}</span>
         <div class="legend" id="legend-all"></div>
       </div>
       <div class="range-row">
-        <span>Rango:</span>
-        <button class="range-btn" onclick="setRange('all',this)">Todo</button>
+        <span>${t.rangeLabel}</span>
+        <button class="range-btn" onclick="setRange('all',this)">${t.rangeAll}</button>
         <button class="range-btn" onclick="setRange(90,this)">90d</button>
         <button class="range-btn active" onclick="setRange(30,this)">30d</button>
         <button class="range-btn" onclick="setRange(7,this)">7d</button>
@@ -694,12 +763,12 @@ canvas{display:block;width:100%;height:185px}
       <canvas id="chart-all"></canvas>
     </div>
 
-    ${data.langsAll.length > 0 ? `<div class="section-title" style="margin-bottom:6px">Lenguajes (todos los proyectos)</div>
+    ${data.langsAll.length > 0 ? `<div class="section-title" style="margin-bottom:6px">${t.langsAllTitle}</div>
     <div class="lang-section" id="langs-all"></div>` : ''}
 
-    <div class="section-title">${data.stats.length} Proyecto${data.stats.length !== 1 ? 's' : ''}</div>
+    <div class="section-title">${data.stats.length} ${data.stats.length !== 1 ? t.projectsWord : t.projectWord}</div>
     ${data.allTags.length > 0 ? `<div class="tag-filters" id="tag-filters">
-      <span class="tag-chip active" data-tag="all" onclick="filterByTag('all',this)">Todos</span>
+      <span class="tag-chip active" data-tag="all" onclick="filterByTag('all',this)">${t.tagAll}</span>
       ${data.allTags.map(t => `<span class="tag-chip" data-tag="${escHtml(t)}" onclick="filterByTag('${escHtml(t)}',this)">${escHtml(t)}</span>`).join('')}
     </div>` : ''}
     <div class="grid" id="cards-grid">${cards}</div>
@@ -713,36 +782,40 @@ canvas{display:block;width:100%;height:185px}
   <!-- Tab: AI -->
   ${data.aiEnabled ? `<div class="scrollable" id="tab-ai" style="display:none">
     <div style="height:8px"></div>
-    ${data.aiSessions.length === 0 ? `<div class="empty-large">Sin datos de IA.<br><small>Requiere <code>~/.claude/projects/</code> o usa "Log AI Usage"</small></div>` : `
+    ${data.aiSessions.length === 0 ? `<div class="empty-large">${t.aiNoData}</div>` : `
     <div class="pills">
-      <div class="pill"><div class="pl">Coste hoy</div><div class="pv">$${aiToday.toFixed(2)}</div></div>
-      <div class="pill"><div class="pl">Coste semana</div><div class="pv">$${aiWeek.toFixed(2)}</div></div>
-      <div class="pill green"><div class="pl">Total</div><div class="pv">$${aiTotalCost.toFixed(2)}</div></div>
-      <div class="pill"><div class="pl">Tokens entrada</div><div class="pv">${fmtTok(aiTokIn)}</div></div>
-      <div class="pill"><div class="pl">Tokens salida</div><div class="pv">${fmtTok(aiTokOut)}</div></div>
-      <div class="pill accent"><div class="pl">Ratio IA/código</div><div class="pv" style="font-size:13px">${aiRatio}</div></div>
+      <div class="pill"><div class="pl">${t.aiCostToday}</div><div class="pv">$${aiToday.toFixed(2)}</div></div>
+      <div class="pill"><div class="pl">${t.aiCostWeek}</div><div class="pv">$${aiWeek.toFixed(2)}</div></div>
+      <div class="pill green"><div class="pl">${t.aiTotal}</div><div class="pv">$${aiTotalCost.toFixed(2)}</div></div>
+      <div class="pill"><div class="pl">${t.aiTokInPill}</div><div class="pv">${fmtTok(aiTokIn)}</div></div>
+      <div class="pill"><div class="pl">${t.aiTokOutPill}</div><div class="pv">${fmtTok(aiTokOut)}</div></div>
+      <div class="pill accent"><div class="pl">${t.aiRatio}</div><div class="pv" style="font-size:13px">${aiRatio}</div></div>
     </div>
     <div class="chart-wrap">
       <div class="chart-title">
-        <span>Coste IA diario (USD) por modelo</span>
+        <span>${t.aiDailyCost}</span>
         <div class="legend" id="ai-legend"></div>
       </div>
       <div class="range-row">
-        <span>Rango:</span>
-        <button class="range-btn" onclick="setAIRange('all',this)">Todo</button>
+        <span>${t.rangeLabel}</span>
+        <button class="range-btn" onclick="setAIRange('all',this)">${t.rangeAll}</button>
         <button class="range-btn" onclick="setAIRange(90,this)">90d</button>
         <button class="range-btn active" onclick="setAIRange(30,this)">30d</button>
         <button class="range-btn" onclick="setAIRange(7,this)">7d</button>
       </div>
       <canvas id="chart-ai"></canvas>
     </div>
-    <div class="section-title" style="margin-bottom:6px">Desglose por modelo</div>
+    <div class="section-title" style="margin-bottom:6px">${t.aiModelBreakdown}</div>
     <table class="model-table">
-      <thead><tr><th>Modelo</th><th>Sesiones</th><th>Tok. entrada</th><th>Tok. salida</th><th>Coste</th></tr></thead>
+      <thead><tr><th>${t.thModel}</th><th>${t.thSessions}</th><th>${t.thTokIn}</th><th>${t.thTokOut}</th><th>${t.thCost}</th></tr></thead>
       <tbody>${modelTableRows}</tbody>
     </table>
+    ${data.aiProjectRanking.length > 0 ? `
+    <div class="section-title" style="margin-bottom:6px">${t.aiByProject}</div>
+    <div id="ai-project-bars"></div>
+    ` : ''}
     <div style="margin-top:8px">
-      <button onclick="doLogAI()">+ Registrar uso de IA manual</button>
+      <button onclick="doLogAI()">${t.aiLogBtn}</button>
     </div>
     `}
   </div>` : ''}
@@ -750,7 +823,7 @@ canvas{display:block;width:100%;height:185px}
   <!-- Tab: Archived -->
   <div class="scrollable" id="tab-archived" style="display:none">
     <div style="height:8px"></div>
-    <div class="section-title">${arcCount} Proyecto${arcCount !== 1 ? 's' : ''} archivado${arcCount !== 1 ? 's' : ''}</div>
+    <div class="section-title">${arcCount} ${arcCount !== 1 ? t.projectsWord : t.projectWord} ${t.archivedWord}</div>
     <div class="grid">${arcCards}</div>
   </div>
 </div>
@@ -759,12 +832,13 @@ canvas{display:block;width:100%;height:185px}
 <div class="page" id="pg-detail">
   <div class="topbar">
     <div style="display:flex;align-items:center;gap:10px;overflow:hidden;min-width:0">
-      <button class="ghost" onclick="showOverview()">← Volver</button>
+      <button class="ghost" onclick="showOverview()">${t.detailBackBtn}</button>
       <h1 id="dt-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></h1>
     </div>
     <div class="actions">
-      <button class="ghost" onclick="showProjectSettings()" title="Configurar este proyecto">⚙ Config</button>
-      <button class="ghost" onclick="doRefresh()">↻</button>
+      <button class="ghost" onclick="doAddNote()">${t.noteBtn}</button>
+      <button class="ghost" onclick="showProjectSettings()">${t.detailConfigBtn}</button>
+      <button class="ghost" onclick="doRefresh()">${t.detailRefreshBtn}</button>
     </div>
   </div>
   <div class="scrollable">
@@ -774,21 +848,41 @@ canvas{display:block;width:100%;height:185px}
     <div id="dt-goals"></div>
     <div class="chart-wrap">
       <div class="chart-title">
-        <span>Actividad diaria — proyecto</span>
+        <span>${t.chartDailyProject}</span>
         <div class="legend" id="dt-legend"></div>
       </div>
       <div class="range-row">
-        <span>Rango:</span>
-        <button class="range-btn" onclick="setRangeDetail('all',this)">Todo</button>
+        <span>${t.rangeLabel}</span>
+        <button class="range-btn" onclick="setRangeDetail('all',this)">${t.rangeAll}</button>
         <button class="range-btn" onclick="setRangeDetail(90,this)">90d</button>
         <button class="range-btn active" onclick="setRangeDetail(30,this)">30d</button>
         <button class="range-btn" onclick="setRangeDetail(7,this)">7d</button>
       </div>
       <canvas id="chart-detail"></canvas>
     </div>
-    <div class="section-title" style="margin-bottom:6px">Lenguajes (este proyecto)</div>
+    <div class="section-title" style="margin-bottom:6px">${t.detailLanguages}</div>
     <div class="lang-section" id="dt-langs"></div>
     <div class="section-list" id="dt-sessions"></div>
+    <div id="dt-ai-section" style="display:none">
+      <div class="section-title" style="margin-top:14px;margin-bottom:6px">${t.aiThisProject}</div>
+      <div class="pills" id="dt-ai-pills"></div>
+      <div class="chart-wrap">
+        <div class="chart-title">
+          <span>${t.aiDailyCost}</span>
+          <div class="legend" id="dt-ai-legend"></div>
+        </div>
+        <div class="range-row">
+          <span>${t.rangeLabel}</span>
+          <button class="range-btn" onclick="setRangeDetailAI('all',this)">${t.rangeAll}</button>
+          <button class="range-btn" onclick="setRangeDetailAI(90,this)">90d</button>
+          <button class="range-btn active" onclick="setRangeDetailAI(30,this)">30d</button>
+          <button class="range-btn" onclick="setRangeDetailAI(7,this)">7d</button>
+        </div>
+        <canvas id="chart-detail-ai"></canvas>
+      </div>
+      <div class="section-title" style="margin-bottom:6px">Tokens</div>
+      <div id="dt-ai-model-table"></div>
+    </div>
   </div>
 </div>
 
@@ -797,10 +891,11 @@ canvas{display:block;width:100%;height:185px}
   const vscode = acquireVsCodeApi();
   const DATA = ${dataJson};
   const PALETTE = ${JSON.stringify(PROJECT_PALETTE)};
+  const TODAY_LABEL = '${lang.startsWith('es') ? 'HOY' : 'TODAY'}';
 
   let currentProject = null;
   let currentProjectIdx = null;
-  let allRange = 30, detailRange = 30, aiRange = 30;
+  let allRange = 30, detailRange = 30, aiRange = 30, detailAIRange = 30;
   let currentTab = 'overview';
   let colorPickerIdx = null;
 
@@ -823,7 +918,7 @@ canvas{display:block;width:100%;height:185px}
       const el = document.getElementById('tab-' + t);
       if (el) el.style.display = t === tab ? '' : 'none';
     });
-    if (tab === 'ai') requestAnimationFrame(() => drawAIChart(sliceRange(DATA.aiDailyData, aiRange)));
+    if (tab === 'ai') requestAnimationFrame(() => { drawAIChart('chart-ai', sliceRange(DATA.aiDailyData, aiRange), 'ai-legend'); renderAIProjectBars(); });
   }
   window.switchTab = switchTab;
 
@@ -841,10 +936,10 @@ canvas{display:block;width:100%;height:185px}
     const pct = DATA.totalAll_ms > 0 ? Math.round(s.total_ms / DATA.totalAll_ms * 100) : 0;
 
     document.getElementById('dt-name').textContent = s.project;
-    document.getElementById('dt-path').textContent = s.projectPath || 'Sin ruta';
+    document.getElementById('dt-path').textContent = s.projectPath || '${t.noPath}';
     document.getElementById('dt-legend').innerHTML =
-      '<div class="legend-item"><div class="legend-dot" style="background:' + s.color + '"></div><span>Horas/día</span></div>' +
-      '<div class="legend-item"><div class="legend-line" id="dt-lg-line"></div><span>Acumulado</span></div>';
+      '<div class="legend-item"><div class="legend-dot" style="background:' + s.color + '"></div><span>${t.hoursPerDay}</span></div>' +
+      '<div class="legend-item"><div class="legend-line" id="dt-lg-line"></div><span>${t.cumulative}</span></div>';
 
     const fmtCostJS = (ms, rate, curr) => {
       if (!rate) return '';
@@ -854,20 +949,20 @@ canvas{display:block;width:100%;height:185px}
     const cost = fmtCostJS(s.total_ms, s.hourlyRate, s.currency);
 
     document.getElementById('dt-pills').innerHTML = [
-      pill('Hoy',    fmt(s.today_ms), fmtCostJS(s.today_ms, s.hourlyRate, s.currency)),
-      pill('Semana', fmt(s.week_ms),  fmtCostJS(s.week_ms,  s.hourlyRate, s.currency)),
-      pill('Total',  fmt(s.total_ms), cost, 'blue'),
+      pill('${t.pillToday}',  fmt(s.today_ms), fmtCostJS(s.today_ms, s.hourlyRate, s.currency)),
+      pill('${t.pillWeek}',  fmt(s.week_ms),  fmtCostJS(s.week_ms,  s.hourlyRate, s.currency)),
+      pill('${t.pillTotal}',  fmt(s.total_ms), cost, 'blue'),
       pill('% total', pct + '%', s.hourlyRate ? s.currency + ' ' + s.hourlyRate + '/h' : ''),
     ].join('');
 
     let goalsHtml = '';
     if (s.dailyGoal_ms > 0) {
       const p = Math.min(100, Math.round(s.today_ms / s.dailyGoal_ms * 100));
-      goalsHtml += goalRow('Meta diaria (proyecto)', s.today_ms, s.dailyGoal_ms, p);
+      goalsHtml += goalRow('${t.goalDailyProject}', s.today_ms, s.dailyGoal_ms, p);
     }
     if (s.weeklyGoal_ms > 0) {
       const p = Math.min(100, Math.round(s.week_ms / s.weeklyGoal_ms * 100));
-      goalsHtml += goalRow('Meta semanal (proyecto)', s.week_ms, s.weeklyGoal_ms, p);
+      goalsHtml += goalRow('${t.goalWeeklyProject}', s.week_ms, s.weeklyGoal_ms, p);
     }
     document.getElementById('dt-goals').innerHTML = goalsHtml
       ? '<div class="goal-section">' + goalsHtml + '</div>' : '';
@@ -876,20 +971,52 @@ canvas{display:block;width:100%;height:185px}
     document.getElementById('dt-langs').innerHTML = renderLangs(langs);
 
     const sessions = DATA.perProjectSessions[s.project] || [];
-    document.getElementById('dt-sessions').innerHTML = sessions.length > 0
-      ? '<div class="section-title" style="margin-top:12px;margin-bottom:6px">Sesiones recientes</div>' + renderSessionTable(sessions)
-      : '';
+    const annotated = sessions.filter(ss => ss.notes || (ss.tags && ss.tags.length > 0));
+    const hiddenCount = sessions.length - annotated.length;
+    let sessionsHtml = '';
+    if (annotated.length > 0) {
+      const footer = hiddenCount > 0
+        ? \`<div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-top:6px">\${hiddenCount} sesión(es) sin anotar oculta(s)</div>\`
+        : '';
+      sessionsHtml = '<div class="section-title" style="margin-top:12px;margin-bottom:6px">${t.detailSessions}</div>' + renderSessionTable(annotated) + footer;
+    } else if (sessions.length > 0) {
+      sessionsHtml = \`<div style="margin-top:12px;padding:10px;background:var(--vscode-editorWidget-background);border-radius:6px;border:1px dashed var(--vscode-widget-border)">
+        <div style="font-size:12px;color:var(--vscode-descriptionForeground);margin-bottom:6px">\${sessions.length} sesión(es) sin anotar</div>
+        <button class="ghost" onclick="doAddNote()" style="font-size:11px">+ Añadir nota a última sesión</button>
+      </div>\`;
+    }
+    document.getElementById('dt-sessions').innerHTML = sessionsHtml;
+
+    // AI section for this project
+    const aiStats = DATA.perProjectAI && DATA.perProjectAI[s.project];
+    const dtAiSection = document.getElementById('dt-ai-section');
+    if (dtAiSection) dtAiSection.style.display = aiStats ? '' : 'none';
+    if (aiStats) {
+      document.getElementById('dt-ai-pills').innerHTML = [
+        pill('IA hoy', '$' + aiStats.todayCost.toFixed(2), ''),
+        pill('IA semana', '$' + aiStats.weekCost.toFixed(2), ''),
+        pill('IA total', '$' + aiStats.totalCost.toFixed(2), '', 'green'),
+        pill('Tokens ent.', fmtTok(aiStats.tokIn), ''),
+        pill('Tokens sal.', fmtTok(aiStats.tokOut), ''),
+      ].join('');
+    }
+    detailAIRange = 30;
 
     document.getElementById('pg-overview').classList.remove('active');
     document.getElementById('pg-detail').classList.add('active');
     detailRange = 30;
-    document.querySelectorAll('#pg-detail .range-btn').forEach((b, i) => b.classList.toggle('active', i === 2));
+    document.querySelectorAll('#pg-detail .range-btn:not([onclick*="DetailAI"])').forEach((b, i) => b.classList.toggle('active', i === 2));
+    document.querySelectorAll('#pg-detail .range-btn[onclick*="DetailAI"]').forEach((b, i) => b.classList.toggle('active', i === 2));
 
     requestAnimationFrame(() => {
       const c = getColors();
       const el = document.getElementById('dt-lg-line');
       if (el) el.style.background = c.line;
       drawSingleChart('chart-detail', sliceRange(DATA.perProject[s.project]||[], detailRange), s.color, c.line, c.muted);
+      if (aiStats) {
+        drawAIChart('chart-detail-ai', sliceRange(aiStats.dailyData, detailAIRange), 'dt-ai-legend');
+        renderDetailAIModelTable(aiStats);
+      }
     });
   }
   window.showDetail = showDetail;
@@ -940,10 +1067,70 @@ canvas{display:block;width:100%;height:185px}
     aiRange = n;
     document.querySelectorAll('#tab-ai .range-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    drawAIChart(sliceRange(DATA.aiDailyData, aiRange));
+    drawAIChart('chart-ai', sliceRange(DATA.aiDailyData, aiRange), 'ai-legend');
   }
+  function renderDetailAIModelTable(aiStats) {
+    const el = document.getElementById('dt-ai-model-table');
+    if (!el) return;
+    const modelAgg = new Map();
+    for (const day of (aiStats.dailyData || [])) {
+      for (const m of (day.models || [])) {
+        if (!modelAgg.has(m.model)) modelAgg.set(m.model, { displayName: m.displayName, color: m.color, cost: 0 });
+        modelAgg.get(m.model).cost += m.cost;
+      }
+    }
+    const rows = Array.from(modelAgg.values())
+      .sort((a, b) => b.cost - a.cost)
+      .map(m => \`<tr>
+        <td><span class="model-dot" style="background:\${m.color}"></span>\${m.displayName}</td>
+        <td>$\${m.cost.toFixed(3)}</td>
+      </tr>\`).join('');
+    el.innerHTML = rows
+      ? \`<table class="model-table">
+          <thead><tr><th>Modelo</th><th>Coste total</th></tr></thead>
+          <tbody>\${rows}</tbody>
+        </table>\`
+      : '';
+  }
+
+  function setRangeDetailAI(n, btn) {
+    detailAIRange = n;
+    document.querySelectorAll('#pg-detail .range-btn[onclick*="DetailAI"]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const aiStats = DATA.perProjectAI && DATA.perProjectAI[currentProject];
+    if (aiStats) {
+      drawAIChart('chart-detail-ai', sliceRange(aiStats.dailyData, detailAIRange), 'dt-ai-legend');
+      renderDetailAIModelTable({ dailyData: sliceRange(aiStats.dailyData, detailAIRange) });
+    }
+  }
+
+  function renderAIProjectBars() {
+    const el = document.getElementById('ai-project-bars');
+    if (!el || !DATA.aiProjectRanking || !DATA.aiProjectRanking.length) return;
+    const maxCost = DATA.aiProjectRanking[0].cost || 0.001;
+    el.innerHTML = DATA.aiProjectRanking.map(p => {
+      const pct = Math.round(p.cost / maxCost * 100);
+      return \`<div style="margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:10px;height:10px;border-radius:3px;background:\${p.color};flex-shrink:0"></div>
+            <span>\${p.project}</span>
+          </div>
+          <div style="display:flex;gap:12px;color:var(--vscode-descriptionForeground);font-size:11px">
+            <span>\${fmtTok(p.tokIn+p.tokOut)} tok</span>
+            <span style="font-weight:600;color:var(--vscode-foreground)">$\${p.cost.toFixed(2)}</span>
+          </div>
+        </div>
+        <div style="height:6px;background:var(--vscode-widget-border);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:\${pct}%;background:\${p.color}cc;border-radius:3px"></div>
+        </div>
+      </div>\`;
+    }).join('');
+  }
+
   window.setRange = setRange;
   window.setRangeDetail = setRangeDetail;
+  window.setRangeDetailAI = setRangeDetailAI;
   window.setAIRange = setAIRange;
 
   function sliceRange(arr, n) { return n === 'all' ? arr : (arr||[]).slice(-n); }
@@ -953,8 +1140,11 @@ canvas{display:block;width:100%;height:185px}
   function doExportJson() { vscode.postMessage({ command: 'exportJson' }); }
   function doRefresh()    { vscode.postMessage({ command: 'refresh' }); }
   function doLogAI()      { vscode.postMessage({ command: 'logAIUsage' }); }
+  function doAddNote()    { vscode.postMessage({ command: 'addSessionNote' }); }
+  function setLang(l)     { vscode.postMessage({ command: 'setLang', lang: l }); }
   window.doExport = doExport; window.doExportJson = doExportJson;
-  window.doRefresh = doRefresh; window.doLogAI = doLogAI;
+  window.doRefresh = doRefresh; window.doLogAI = doLogAI; window.doAddNote = doAddNote;
+  window.setLang = setLang;
 
   // ── Tag filter ───────────────────────────────────
   let activeTag = 'all';
@@ -978,7 +1168,7 @@ canvas{display:block;width:100%;height:185px}
     if (!sessions || !sessions.length) return '';
     const rows = sessions.map(s => {
       const tags = (s.tags||[]).map(t => \`<span class="session-tag">\${t}</span>\`).join('');
-      const pomo = s.pomodoroCount > 0 ? \`🍅\${s.pomodoroCount}\` : '';
+      const pomo = s.pomodoroCount > 0 ? \`\${s.pomodoroCount}\` : '';
       return \`<tr>
         <td style="white-space:nowrap;color:var(--vscode-descriptionForeground)">\${s.date}</td>
         <td style="white-space:nowrap">\${fmt(s.duration_ms)}</td>
@@ -988,7 +1178,7 @@ canvas{display:block;width:100%;height:185px}
       </tr>\`;
     }).join('');
     return \`<table class="session-table">
-      <thead><tr><th>Fecha</th><th>Duración</th><th>Tags</th><th>Notas</th><th>🍅</th></tr></thead>
+      <thead><tr><th>${t.detailSessionDate}</th><th>${t.detailSessionDuration}</th><th>${t.detailSessionTags}</th><th>${t.detailSessionNotes}</th><th>${t.detailSessionPomo}</th></tr></thead>
       <tbody>\${rows}</tbody>
     </table>\`;
   }
@@ -1028,7 +1218,7 @@ canvas{display:block;width:100%;height:185px}
     const wh = parseFloat(document.getElementById('wgoal-' + idx)?.value) || 0;
     vscode.postMessage({ command: 'saveProjectGoals', project: s.project, hourlyRate: rate, currency, dailyGoalHours: dh, weeklyGoalHours: wh });
     const btn = document.querySelector('#proj-row-' + idx + ' .cfg-save-btn');
-    if (btn) { btn.textContent = '✓'; setTimeout(() => btn.textContent = 'Guardar', 1500); }
+    if (btn) { btn.textContent = '✓'; setTimeout(() => btn.textContent = '${t.settingsSaveBtn}', 1500); }
   }
   window.saveGlobalConfig = saveGlobalConfig;
   window.saveProjectGoals = saveProjectGoals;
@@ -1071,16 +1261,32 @@ canvas{display:block;width:100%;height:185px}
   window.openColorPicker = openColorPicker;
   window.pickColor = pickColor;
 
+  // Local-day key (YYYY-MM-DD) — mirror of storage.localDay, needed in the
+  // webview because the server-side import is not available here.
+  function localDay(d) {
+    const dt = (typeof d === 'string') ? new Date(d) : d;
+    const y = dt.getFullYear();
+    const m = String(dt.getMonth() + 1).padStart(2, '0');
+    const day = String(dt.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+  }
+
   // ── Formatters ───────────────────────────────────
   function fmt(ms) {
     if (!ms) return '—';
     const h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000);
     if (!h) return m + 'm'; if (!m) return h + 'h'; return h + 'h ' + m + 'm';
   }
+  function fmtTok(n) {
+    if (!n) return '0';
+    if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+    if (n >= 1000) return Math.round(n/1000) + 'K';
+    return n.toString();
+  }
 
   // ── Language bars ────────────────────────────────
   function renderLangs(langs) {
-    if (!langs?.length) return '<p class="empty">Sin datos de lenguaje.</p>';
+    if (!langs?.length) return '<p class="empty">${t.noLangData}</p>';
     const total = langs.reduce((a,l) => a+l.ms, 0);
     const colors = ['#4fc3f7','#81c784','#ffb74d','#f06292','#ce93d8','#80cbc4','#ff8a65','#a5d6a7','#b39ddb','#fff176'];
     return langs.slice(0, 8).map((l, i) => {
@@ -1117,8 +1323,10 @@ canvas{display:block;width:100%;height:185px}
       ctx.beginPath(); ctx.moveTo(P.left, y); ctx.lineTo(P.left+pw, y); ctx.stroke();
       ctx.textAlign = 'right';
       ctx.fillText(fmtL(maxL*i/gridLines), P.left-4, y+3);
-      ctx.textAlign = 'left';
-      ctx.fillText(fmtR(maxR*i/gridLines), P.left+pw+4, y+3);
+      if (fmtR) {
+        ctx.textAlign = 'left';
+        ctx.fillText(fmtR(maxR*i/gridLines), P.left+pw+4, y+3);
+      }
     }
   }
 
@@ -1140,13 +1348,21 @@ canvas{display:block;width:100%;height:185px}
   }
 
   function drawXLabels(ctx, entries, P, pw, ph, muted) {
-    ctx.fillStyle = muted; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+    const todayStr = localDay(new Date());
+    ctx.textAlign = 'center';
     const n = entries.length;
+    if (!n) return;
     const step = Math.max(1, Math.ceil(n/8));
-    for (let i = 0; i < n; i += step) {
-      ctx.fillText(entries[i].date.substring(5), P.left+i*(pw/n)+pw/n/2, P.top+ph+14);
-    }
-    if (n > 1) ctx.fillText(entries[n-1].date.substring(5), P.left+(n-1)*(pw/n)+pw/n/2, P.top+ph+14);
+    const drawOne = (i) => {
+      const d = String(entries[i].date || '');
+      const isToday = d === todayStr;
+      // Canvas fillStyle does NOT accept CSS var(); use a literal color.
+      ctx.fillStyle = isToday ? '#4fc3f7' : muted;
+      ctx.font = isToday ? 'bold 10px sans-serif' : '10px sans-serif';
+      ctx.fillText(isToday ? TODAY_LABEL : d.substring(5), P.left+i*(pw/n)+pw/n/2, P.top+ph+15);
+    };
+    for (let i = 0; i < n; i += step) drawOne(i);
+    if (n > 1 && (n-1) % step !== 0) drawOne(n-1);
   }
 
   function drawAxisLines(ctx, P, pw, ph) {
@@ -1154,33 +1370,92 @@ canvas{display:block;width:100%;height:185px}
     ctx.beginPath(); ctx.moveTo(P.left,P.top); ctx.lineTo(P.left,P.top+ph); ctx.lineTo(P.left+pw,P.top+ph); ctx.stroke();
   }
 
+  function drawTodayLine(ctx, entries, P, pw, ph) {
+    const todayStr = localDay(new Date());
+    const n = entries.length;
+    const idx = entries.findIndex(e => e.date === todayStr);
+    if (idx < 0) return;
+    const x = P.left + idx * (pw/n) + pw/n/2;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(79,195,247,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath(); ctx.moveTo(x, P.top); ctx.lineTo(x, P.top + ph); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ── Hover tooltip for canvas bar charts ──────────
+  function attachChartTooltip(canvasId, hits) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    canvas._hits = hits;
+    if (canvas._tipBound) return;
+    canvas._tipBound = true;
+    let tip = document.getElementById('chart-tip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'chart-tip';
+      tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;display:none;'
+        + 'background:var(--vscode-editorHoverWidget-background,#252526);'
+        + 'color:var(--vscode-editorHoverWidget-foreground,#ccc);'
+        + 'border:1px solid var(--vscode-editorHoverWidget-border,#454545);'
+        + 'padding:4px 8px;border-radius:4px;font-size:11px;white-space:nowrap;'
+        + 'box-shadow:0 2px 8px rgba(0,0,0,.4)';
+      document.body.appendChild(tip);
+    }
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      const list = canvas._hits || [];
+      let found = null;
+      for (const hgt of list) {
+        if (mx >= hgt.x && mx <= hgt.x+hgt.w && my >= hgt.y && my <= hgt.y+hgt.h) { found = hgt; break; }
+      }
+      if (found) {
+        tip.innerHTML = '<b>' + found.project + '</b> — ' + fmt(found.ms)
+          + '<br><span style="opacity:.7">' + found.date + '</span>';
+        tip.style.display = 'block';
+        tip.style.left = (e.clientX + 12) + 'px';
+        tip.style.top = (e.clientY + 12) + 'px';
+        canvas.style.cursor = 'pointer';
+      } else {
+        tip.style.display = 'none';
+        canvas.style.cursor = 'default';
+      }
+    });
+    canvas.addEventListener('mouseleave', () => {
+      const t = document.getElementById('chart-tip');
+      if (t) t.style.display = 'none';
+      canvas.style.cursor = 'default';
+    });
+  }
+
   // ── Stacked bar chart (overview) ─────────────────
   function drawStackedChart(canvasId, stackedDays) {
     const setup = setupCanvas(canvasId, 185);
     if (!setup) return;
     const { ctx, W, H } = setup;
-    const { line: lineColor, muted } = getColors();
+    const { muted } = getColors();
     const n = (stackedDays||[]).length;
-    const P = { top:18, right:58, bottom:42, left:50 };
+    // Single Y-axis only (left = hours/day). No right axis, no cumulative line.
+    const P = { top:18, right:14, bottom:42, left:50 };
     const pw = W-P.left-P.right, ph = H-P.top-P.bottom;
 
     if (!n) {
       ctx.fillStyle = muted; ctx.font='12px sans-serif'; ctx.textAlign='center';
-      ctx.fillText('Sin datos para el rango seleccionado', W/2, H/2); return;
+      ctx.fillText('${t.noDataRange}', W/2, H/2); return;
     }
 
     const totals = stackedDays.map(d => d.slices.reduce((s,sl)=>s+sl.ms,0));
     const maxH = Math.max(...totals.map(t=>t/3600000), 0.5);
-    let cum = 0;
-    const cumH = totals.map(t => { cum += t/3600000; return cum; });
-    const maxCum = Math.max(...cumH, 0.5);
 
     const gapW = pw/n, barW = Math.max(gapW*0.65, 1.5);
 
-    drawGrid(ctx, P, pw, ph, 4, maxH, maxCum, muted,
+    drawGrid(ctx, P, pw, ph, 4, maxH, 0, muted,
       v => v>=1 ? v.toFixed(1)+'h' : Math.round(v*60)+'m',
-      v => v.toFixed(0)+'h');
+      null);
 
+    const hits = [];
     for (let i = 0; i < n; i++) {
       const slices = stackedDays[i].slices;
       if (!slices.length) continue;
@@ -1203,18 +1478,15 @@ canvas{display:block;width:100%;height:185px}
         } else {
           ctx.fillRect(x, y, barW, bh);
         }
+        hits.push({ x, y, w: barW, h: bh, project: slice.project, ms: slice.ms, date: stackedDays[i].date });
         yBottom -= bh;
       }
     }
 
-    const pts = [];
-    for (let i = 0; i < n; i++) {
-      if (!cumH[i]) continue;
-      pts.push({ x: P.left+i*gapW+gapW/2, y: P.top+ph-(cumH[i]/maxCum)*ph });
-    }
-    drawCumLine(ctx, pts, lineColor);
+    drawTodayLine(ctx, stackedDays, P, pw, ph);
     drawXLabels(ctx, stackedDays, P, pw, ph, muted);
     drawAxisLines(ctx, P, pw, ph);
+    attachChartTooltip(canvasId, hits);
 
     const legendEl = document.getElementById('legend-all');
     if (legendEl) {
@@ -1226,7 +1498,7 @@ canvas{display:block;width:100%;height:185px}
       }
       legendEl.innerHTML = Array.from(seen.entries()).slice(0,6).map(([p,c]) =>
         \`<div class="legend-item"><div class="legend-dot" style="background:\${c}"></div><span>\${p}</span></div>\`
-      ).join('') + \`<div class="legend-item"><div class="legend-line" style="background:\${lineColor}"></div><span>Acumulado</span></div>\`;
+      ).join('');
     }
   }
 
@@ -1241,7 +1513,7 @@ canvas{display:block;width:100%;height:185px}
 
     if (!n) {
       ctx.fillStyle = muted; ctx.font='12px sans-serif'; ctx.textAlign='center';
-      ctx.fillText('Sin datos para el rango seleccionado', W/2, H/2); return;
+      ctx.fillText('${t.noDataRange}', W/2, H/2); return;
     }
 
     const hours = entries.map(e=>(e.ms||0)/3600000);
@@ -1275,13 +1547,14 @@ canvas{display:block;width:100%;height:185px}
       pts.push({x: P.left+i*gapW+gapW/2, y: P.top+ph-(cumH[i]/maxCum)*ph});
     }
     drawCumLine(ctx, pts, lineColor);
+    drawTodayLine(ctx, entries, P, pw, ph);
     drawXLabels(ctx, entries, P, pw, ph, muted);
     drawAxisLines(ctx, P, pw, ph);
   }
 
   // ── AI stacked chart ─────────────────────────────
-  function drawAIChart(aiDays) {
-    const setup = setupCanvas('chart-ai', 185);
+  function drawAIChart(canvasId, aiDays, legendId) {
+    const setup = setupCanvas(canvasId || 'chart-ai', 185);
     if (!setup) return;
     const { ctx, W, H } = setup;
     const { line: lineColor, muted } = getColors();
@@ -1289,7 +1562,7 @@ canvas{display:block;width:100%;height:185px}
     const P = { top:18, right:66, bottom:42, left:58 };
     const pw = W-P.left-P.right, ph = H-P.top-P.bottom;
 
-    if (!n) { ctx.fillStyle=muted; ctx.font='12px sans-serif'; ctx.textAlign='center'; ctx.fillText('Sin datos',W/2,H/2); return; }
+    if (!n) { ctx.fillStyle=muted; ctx.font='12px sans-serif'; ctx.textAlign='center'; ctx.fillText('${t.noDataShort}',W/2,H/2); return; }
 
     const totals = aiDays.map(d => d.total||0);
     const maxC = Math.max(...totals, 0.01);
@@ -1333,17 +1606,17 @@ canvas{display:block;width:100%;height:185px}
     drawXLabels(ctx, aiDays, P, pw, ph, muted);
     drawAxisLines(ctx, P, pw, ph);
 
-    const aiLegend = document.getElementById('ai-legend');
-    if (aiLegend) {
+    const legendEl = document.getElementById(legendId || 'ai-legend');
+    if (legendEl) {
       const seen = new Map();
       for (const day of aiDays) {
         for (const m of (day.models||[])) {
           if (!seen.has(m.model)) seen.set(m.model, { name: m.displayName, color: m.color });
         }
       }
-      aiLegend.innerHTML = Array.from(seen.values()).slice(0,5).map(m =>
+      legendEl.innerHTML = Array.from(seen.values()).slice(0,5).map(m =>
         \`<div class="legend-item"><div class="legend-dot" style="background:\${m.color}"></div><span>\${m.name}</span></div>\`
-      ).join('') + \`<div class="legend-item"><div class="legend-line" style="background:\${lineColor}"></div><span>Acumulado</span></div>\`;
+      ).join('') + \`<div class="legend-item"><div class="legend-line" style="background:\${lineColor}"></div><span>${t.cumulative}</span></div>\`;
     }
   }
 
@@ -1354,14 +1627,17 @@ canvas{display:block;width:100%;height:185px}
     if (langsEl) langsEl.innerHTML = renderLangs(DATA.langsAll);
   }
   requestAnimationFrame(init);
+  setInterval(() => vscode.postMessage({ command: 'refresh' }), 60000);
 
   window.addEventListener('resize', () => {
     const c = getColors();
     if (document.getElementById('pg-detail').classList.contains('active') && currentProject) {
       const s = DATA.stats.find(x => x.project === currentProject);
       drawSingleChart('chart-detail', sliceRange(DATA.perProject[currentProject]||[], detailRange), s?.color||'#4fc3f7', c.line, c.muted);
+      const aiStats = DATA.perProjectAI && DATA.perProjectAI[currentProject];
+      if (aiStats) drawAIChart('chart-detail-ai', sliceRange(aiStats.dailyData, detailAIRange), 'dt-ai-legend');
     } else if (currentTab === 'ai') {
-      drawAIChart(sliceRange(DATA.aiDailyData, aiRange));
+      drawAIChart('chart-ai', sliceRange(DATA.aiDailyData, aiRange), 'ai-legend');
     } else {
       drawStackedChart('chart-all', sliceRange(DATA.stackedDaily, allRange));
     }
@@ -1372,7 +1648,7 @@ canvas{display:block;width:100%;height:185px}
 </html>`;
 }
 
-export function openDashboard(context: vscode.ExtensionContext): void {
+export function openDashboard(context: vscode.ExtensionContext, tracker?: TimeTracker): void {
   const panel = vscode.window.createWebviewPanel(
     'vscodeTracker',
     'Time Tracker',
@@ -1380,8 +1656,13 @@ export function openDashboard(context: vscode.ExtensionContext): void {
     { enableScripts: true, retainContextWhenHidden: true }
   );
 
+  function resolveLang(): string {
+    const pref = vscode.workspace.getConfiguration('vscodeTracker').get<string>('language') ?? 'auto';
+    return pref === 'auto' ? vscode.env.language : pref;
+  }
+  let lang = resolveLang();
   function refresh(): void {
-    panel.webview.html = generateDashboardHtml();
+    panel.webview.html = generateDashboardHtml(lang, tracker);
   }
 
   refresh();
@@ -1400,8 +1681,20 @@ export function openDashboard(context: vscode.ExtensionContext): void {
       case 'refresh':
         refresh();
         break;
+      case 'setLang': {
+        const choice = msg.lang === 'es' || msg.lang === 'en' ? msg.lang : 'auto';
+        await vscode.workspace.getConfiguration('vscodeTracker')
+          .update('language', choice, vscode.ConfigurationTarget.Global);
+        lang = resolveLang();
+        refresh();
+        break;
+      }
       case 'logAIUsage':
         vscode.commands.executeCommand('vscodeTracker.logAIUsage');
+        break;
+      case 'addSessionNote':
+        await vscode.commands.executeCommand('vscodeTracker.addSessionNote');
+        refresh();
         break;
       case 'setProjectColor': {
         const existing = getProjectConfig(msg.project) ?? { project: msg.project };

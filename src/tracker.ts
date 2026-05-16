@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { Segment, appendSegment, getTodayTotal } from './storage';
+import { execSync } from 'child_process';
+import { Segment, appendSegment, getTodayTotal, localDay, splitByLocalDay } from './storage';
 
 export class TimeTracker implements vscode.Disposable {
   private sessionStart: Date | null = null;
@@ -21,11 +22,21 @@ export class TimeTracker implements vscode.Disposable {
   constructor() {
     this.disposables.push(
       vscode.window.onDidChangeWindowState(e => {
-        if (e.focused) this.startSession();
-        else this.endSession();
+        if (e.focused) {
+          this.lastActivity = new Date();
+          this.startSession();
+        } else {
+          this.endSession();
+        }
       }),
       vscode.window.onDidChangeActiveTextEditor(editor => {
         this.lastActivity = new Date();
+        const folder = editor ? vscode.workspace.getWorkspaceFolder(editor.document.uri) : undefined;
+        if (folder && folder.name !== this.currentProject) {
+          this.endSession();
+          this.updateCurrentProject();
+          this.startSession();
+        }
         this.recordLangSwitch(editor);
         if (!this.sessionStart) this.startSession();
       }),
@@ -36,8 +47,23 @@ export class TimeTracker implements vscode.Disposable {
         this.endSession();
         this.updateCurrentProject();
         this.startSession();
-      })
+      }),
     );
+    // Proposed API: only usable in extension dev mode / with --enable-proposed-api.
+    // Calling it in a normally-installed extension throws, so guard it.
+    try {
+      const onTerminalData = (vscode.window as any).onDidWriteTerminalData;
+      if (typeof onTerminalData === 'function') {
+        this.disposables.push(
+          onTerminalData(() => {
+            this.lastActivity = new Date();
+            if (!this.sessionStart) this.startSession();
+          })
+        );
+      }
+    } catch {
+      // terminalDataWriteEvent proposal unavailable — terminal activity not tracked
+    }
     this.updateCurrentProject();
     this.startSession();
     this.startIdleTimer();
@@ -63,14 +89,33 @@ export class TimeTracker implements vscode.Disposable {
   }
 
   private updateCurrentProject(): void {
-    const folders = vscode.workspace.workspaceFolders;
-    if (folders && folders.length > 0) {
-      this.currentProject = folders[0].name;
-      this.currentPath = folders[0].uri.fsPath;
+    const ed = vscode.window.activeTextEditor;
+    const wf = ed ? vscode.workspace.getWorkspaceFolder(ed.document.uri) : undefined;
+    const folder = wf ?? vscode.workspace.workspaceFolders?.[0];
+    if (folder) {
+      this.currentProject = folder.name;
+      this.currentPath = folder.uri.fsPath;
     } else {
       this.currentProject = 'No workspace';
       this.currentPath = '';
     }
+  }
+
+  private readGit(cwd: string): { branch?: string; commit?: string } {
+    const run = (args: string): string | undefined => {
+      try {
+        return execSync('git ' + args, {
+          cwd,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).toString().trim() || undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    return {
+      branch: run('rev-parse --abbrev-ref HEAD'),
+      commit: run('rev-parse --short HEAD'),
+    };
   }
 
   private startSession(): void {
@@ -97,18 +142,30 @@ export class TimeTracker implements vscode.Disposable {
     const duration_ms = end.getTime() - this.sessionStart.getTime();
     if (duration_ms > 1000) {
       const dominantLang = Object.entries(this.langTime).sort((a, b) => b[1] - a[1])[0]?.[0];
-      const segment: Segment = {
-        project: this.currentProject,
-        projectPath: this.currentPath,
-        start: this.sessionStart.toISOString(),
-        end: end.toISOString(),
-        duration_ms,
-        language: dominantLang,
-        languages: Object.keys(this.langTime).length > 0 ? { ...this.langTime } : undefined,
-      };
-      appendSegment(segment);
-      this.checkGoalNotification(segment.duration_ms);
-      this.checkBreakReminder(segment.duration_ms);
+      let git: { branch?: string; commit?: string } = {};
+      if (this.currentPath) git = this.readGit(this.currentPath);
+
+      const parts = splitByLocalDay(this.sessionStart, end);
+      const totalMs = duration_ms;
+      parts.forEach((p, idx) => {
+        const segment: Segment = {
+          project: this.currentProject,
+          projectPath: this.currentPath,
+          start: p.start,
+          end: p.end,
+          duration_ms: p.duration_ms,
+          language: dominantLang,
+          // Keep the per-language breakdown only when the session did not
+          // span midnight; splitting it across days would double-count.
+          languages: parts.length === 1 && Object.keys(this.langTime).length > 0
+            ? { ...this.langTime } : undefined,
+        };
+        if (git.branch) segment.gitBranch = git.branch;
+        if (git.commit) segment.gitCommit = git.commit;
+        appendSegment(segment);
+      });
+      this.checkGoalNotification(totalMs);
+      this.checkBreakReminder(totalMs);
     }
     this.sessionStart = null;
     this.langTime = {};
@@ -119,14 +176,14 @@ export class TimeTracker implements vscode.Disposable {
     const cfg = vscode.workspace.getConfiguration('vscodeTracker');
     const goalMs = (cfg.get<number>('dailyGoalHours') ?? 0) * 3600000;
     if (goalMs <= 0) return;
-    const today = new Date().toISOString().substring(0, 10);
+    const today = localDay(new Date());
     if (this.goalNotifiedDate === today) return;
     const todayTotal = getTodayTotal();
     const prevTotal = todayTotal - savedDuration;
     if (prevTotal < goalMs && todayTotal >= goalMs) {
       this.goalNotifiedDate = today;
       vscode.window.showInformationMessage(
-        `🎯 ¡Meta diaria alcanzada! ${(goalMs / 3600000).toFixed(1)}h de código completadas.`
+        `Meta diaria alcanzada: ${(goalMs / 3600000).toFixed(1)}h de codigo completadas.`
       );
     }
   }
@@ -149,7 +206,7 @@ export class TimeTracker implements vscode.Disposable {
     if (!this.breakReminderFired && this.continuousWorkMs >= reminderMs) {
       this.breakReminderFired = true;
       vscode.window.showWarningMessage(
-        `⏰ Llevas ~${Math.round(this.continuousWorkMs / 3600000 * 10) / 10}h seguidas. Considera tomar un descanso.`
+        `Llevas ~${Math.round(this.continuousWorkMs / 3600000 * 10) / 10}h seguidas. Considera tomar un descanso.`
       );
     }
   }
@@ -162,9 +219,17 @@ export class TimeTracker implements vscode.Disposable {
   private startIdleTimer(): void {
     this.idleTimer = setInterval(() => {
       const config = vscode.workspace.getConfiguration('vscodeTracker');
-      const threshold = (config.get<number>('idleThresholdSeconds') ?? 300) * 1000;
+      // Window focused = user is present (watching AI agent, Copilot chat, sidebar, etc.)
+      if (vscode.window.state.focused) {
+        this.lastActivity = new Date();
+        return;
+      }
+      // Unfocused does NOT mean idle: user often watches an AI run, reads docs
+      // in a browser, or reviews output. Allow a long grace before ending the
+      // session so a 15-min AI turn is not split into fragments.
+      const grace = (config.get<number>('unfocusedGraceSeconds') ?? 900) * 1000;
       const idleMs = Date.now() - this.lastActivity.getTime();
-      if (idleMs > threshold && this.sessionStart) {
+      if (idleMs > grace && this.sessionStart) {
         this.endSession();
       }
     }, 15000);

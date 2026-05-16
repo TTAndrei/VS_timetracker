@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { loadManualAIEntries, ManualAIEntry } from './storage';
+import { loadManualAIEntries, ManualAIEntry, localDay, parseLocalDay } from './storage';
 
 export interface CustomModelConfig {
   name: string;
@@ -37,6 +37,7 @@ export interface AIStackedDay {
 }
 
 // ── Model metadata ─────────────────────────────────────────────────────────
+
 const MODEL_META: Record<string, { displayName: string; color: string }> = {
   'claude-opus-4':    { displayName: 'Claude Opus 4',    color: '#9c27b0' },
   'claude-sonnet-4':  { displayName: 'Claude Sonnet 4',  color: '#2196f3' },
@@ -47,13 +48,14 @@ const MODEL_META: Record<string, { displayName: string; color: string }> = {
   'copilot':          { displayName: 'GitHub Copilot',   color: '#f9a825' },
   'gpt-4':            { displayName: 'GPT-4',            color: '#10a37f' },
   'gpt-3':            { displayName: 'GPT-3.5',          color: '#19c37d' },
-  'cursor':           { displayName: 'Cursor',           color: '#ff6f00' },
-  'aider':            { displayName: 'Aider',            color: '#e91e63' },
+  'cursor':           { displayName: 'Cursor',            color: '#ff6f00' },
+  'aider':            { displayName: 'Aider',             color: '#e91e63' },
 };
 
 const MODEL_FALLBACK = { displayName: 'Unknown', color: '#888888' };
 
-// ── Pricing per million tokens (input / cache-write / cache-read / output) ─
+// ── Pricing per million tokens ─────────────────────────────────────────────
+
 const PRICING: Array<{ prefix: string; i: number; cw: number; cr: number; o: number }> = [
   { prefix: 'claude-opus-4',    i: 15,   cw: 18.75, cr: 1.50, o: 75   },
   { prefix: 'claude-opus-3',    i: 15,   cw: 18.75, cr: 1.50, o: 75   },
@@ -63,7 +65,7 @@ const PRICING: Array<{ prefix: string; i: number; cw: number; cr: number; o: num
   { prefix: 'claude-haiku-3',   i: 0.25, cw: 0.30,  cr: 0.03, o: 1.25 },
 ];
 
-function getModelPrefix(model: string): string {
+export function getModelPrefix(model: string): string {
   let best = '';
   for (const key of Object.keys(MODEL_META)) {
     if (model.startsWith(key) && key.length > best.length) best = key;
@@ -78,7 +80,6 @@ function getModelMeta(prefix: string, customModels: CustomModelConfig[]): { disp
   if (MODEL_META[prefix]) return MODEL_META[prefix];
   const custom = customModels.find(c => prefix === c.name || prefix.startsWith(c.name));
   if (custom) return { displayName: custom.displayName ?? custom.name, color: custom.color ?? '#888888' };
-  // Partial match: "gpt" matches any gpt-* model
   for (const key of Object.keys(MODEL_META)) {
     if (prefix.startsWith(key)) return MODEL_META[key];
   }
@@ -91,7 +92,7 @@ function getPricing(model: string, customModels: CustomModelConfig[]) {
   }
   const custom = customModels.find(c => model.startsWith(c.name) || model === c.name);
   if (custom) return { i: custom.input_per_mtok, o: custom.output_per_mtok, cw: 0, cr: 0 };
-  return { i: 3, o: 15, cw: 3.75, cr: 0.30 }; // default: sonnet-4
+  return { i: 3, o: 15, cw: 3.75, cr: 0.30 };
 }
 
 function calcCost(usage: Record<string, number>, model: string, customModels: CustomModelConfig[]): number {
@@ -105,13 +106,14 @@ function calcCost(usage: Record<string, number>, model: string, customModels: Cu
   );
 }
 
-function calcCostManual(tokIn: number, tokOut: number, model: string, customModels: CustomModelConfig[]): number {
+export function calcCostManual(tokIn: number, tokOut: number, model: string, customModels: CustomModelConfig[]): number {
   const p = getPricing(model, customModels);
   const M = 1_000_000;
   return tokIn * p.i / M + tokOut * p.o / M;
 }
 
-// ── Internal aggregation structure ────────────────────────────────────────
+// ── Internal aggregation ───────────────────────────────────────────────────
+
 interface ModelEntry {
   cost_usd: number;
   tokens_in: number;
@@ -138,7 +140,12 @@ function getOrCreateDate(byDate: Map<string, DateEntry>, date: string): DateEntr
   return byDate.get(date)!;
 }
 
-function processFile(filePath: string, byDate: Map<string, DateEntry>, customModels: CustomModelConfig[]): void {
+// Processes a JSONL file and updates all provided DateEntry maps simultaneously
+function processFile(
+  filePath: string,
+  maps: Map<string, DateEntry>[],
+  customModels: CustomModelConfig[]
+): void {
   let raw: string;
   try { raw = fs.readFileSync(filePath, 'utf-8'); } catch { return; }
 
@@ -150,7 +157,7 @@ function processFile(filePath: string, byDate: Map<string, DateEntry>, customMod
 
     const ts: string = obj.timestamp ?? '';
     if (!ts) continue;
-    const date = ts.substring(0, 10);
+    const date = localDay(ts);
     const sessionId: string = obj.sessionId ?? filePath;
     const model: string = obj.message.model ?? 'claude-sonnet-4-6';
     const usage: Record<string, number> = obj.message.usage;
@@ -162,18 +169,26 @@ function processFile(filePath: string, byDate: Map<string, DateEntry>, customMod
       + (usage['cache_read_input_tokens'] ?? 0);
     const tokOut = usage['output_tokens'] ?? 0;
 
-    const dateEntry = getOrCreateDate(byDate, date);
-    dateEntry.sessions.add(sessionId);
-
-    const modelEntry = getOrCreateModel(dateEntry, prefix);
-    modelEntry.cost_usd += cost;
-    modelEntry.tokens_in += tokIn;
-    modelEntry.tokens_out += tokOut;
-    modelEntry.sessions.add(sessionId);
+    for (const byDate of maps) {
+      const dateEntry = getOrCreateDate(byDate, date);
+      dateEntry.sessions.add(sessionId);
+      const modelEntry = getOrCreateModel(dateEntry, prefix);
+      modelEntry.cost_usd += cost;
+      modelEntry.tokens_in += tokIn;
+      modelEntry.tokens_out += tokOut;
+      modelEntry.sessions.add(sessionId);
+    }
   }
 }
 
-function walkDir(dir: string, depth: number, byDate: Map<string, DateEntry>, customModels: CustomModelConfig[]): void {
+function walkDir(
+  dir: string,
+  depth: number,
+  globalByDate: Map<string, DateEntry>,
+  customModels: CustomModelConfig[],
+  byProjectDir: Map<string, Map<string, DateEntry>>,
+  projectDirName?: string
+): void {
   if (depth > 3) return;
   let entries: string[];
   try { entries = fs.readdirSync(dir); } catch { return; }
@@ -182,41 +197,21 @@ function walkDir(dir: string, depth: number, byDate: Map<string, DateEntry>, cus
     let stat: fs.Stats;
     try { stat = fs.statSync(full); } catch { continue; }
     if (stat.isDirectory()) {
-      walkDir(full, depth + 1, byDate, customModels);
+      // depth === 0 means we're inside ~/.claude/projects/, each subdir is a project dir
+      const subProjectDirName = depth === 0 ? entry : projectDirName;
+      walkDir(full, depth + 1, globalByDate, customModels, byProjectDir, subProjectDirName);
     } else if (entry.endsWith('.jsonl')) {
-      processFile(full, byDate, customModels);
+      const maps: Map<string, DateEntry>[] = [globalByDate];
+      if (projectDirName !== undefined) {
+        if (!byProjectDir.has(projectDirName)) byProjectDir.set(projectDirName, new Map());
+        maps.push(byProjectDir.get(projectDirName)!);
+      }
+      processFile(full, maps, customModels);
     }
   }
 }
 
-export function loadAISessions(customModels: CustomModelConfig[] = []): AISession[] {
-  const byDate = new Map<string, DateEntry>();
-
-  // 1. Parse Claude Code JSONL logs
-  const claudeDir = path.join(os.homedir(), '.claude', 'projects');
-  if (fs.existsSync(claudeDir)) {
-    walkDir(claudeDir, 0, byDate, customModels);
-  }
-
-  // 2. Merge manual entries
-  let manualEntries: ManualAIEntry[] = [];
-  try { manualEntries = loadManualAIEntries(); } catch { /* ignore */ }
-  for (const m of manualEntries) {
-    const prefix = getModelPrefix(m.model) || m.model;
-    const cost = m.cost_usd_override ?? calcCostManual(m.tokens_in, m.tokens_out, m.model, customModels);
-    const manualId = `manual-${m.date}-${m.model}-${m.tokens_in}`;
-
-    const dateEntry = getOrCreateDate(byDate, m.date);
-    dateEntry.sessions.add(manualId);
-
-    const modelEntry = getOrCreateModel(dateEntry, prefix);
-    modelEntry.cost_usd += cost;
-    modelEntry.tokens_in += m.tokens_in;
-    modelEntry.tokens_out += m.tokens_out;
-    modelEntry.sessions.add(manualId);
-  }
-
-  // 3. Convert to AISession[]
+function convertToSessions(byDate: Map<string, DateEntry>, customModels: CustomModelConfig[]): AISession[] {
   return Array.from(byDate.entries())
     .map(([date, dateEntry]) => {
       const models: AIModelUsage[] = Array.from(dateEntry.models.entries())
@@ -246,17 +241,71 @@ export function loadAISessions(customModels: CustomModelConfig[] = []): AISessio
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// ── Public: encode a local project path to match Claude Code dir naming ────
+// Claude Code names project dirs by replacing path separators, colons,
+// underscores, and dots with hyphens.
+// e.g. C:\Users\foo\my_project → C--Users-foo-my-project
+export function encodeProjectPath(p: string): string {
+  return p.replace(/[:\\/._]/g, '-');
+}
+
+// ── Public: load all AI data in one pass, including per-project breakdown ──
+
+export function loadAIDataFull(customModels: CustomModelConfig[] = []): {
+  sessions: AISession[];
+  byProjectDir: Map<string, AISession[]>;  // Claude encoded dir name -> sessions for that project
+} {
+  const globalByDate = new Map<string, DateEntry>();
+  const byProjectDir = new Map<string, Map<string, DateEntry>>();
+
+  const claudeDir = path.join(os.homedir(), '.claude', 'projects');
+  if (fs.existsSync(claudeDir)) {
+    walkDir(claudeDir, 0, globalByDate, customModels, byProjectDir);
+  }
+
+  // Merge manual entries into global only (manual entries have no project association)
+  let manualEntries: ManualAIEntry[] = [];
+  try { manualEntries = loadManualAIEntries(); } catch { /* ignore */ }
+  for (const m of manualEntries) {
+    const prefix = getModelPrefix(m.model) || m.model;
+    const cost = m.cost_usd_override ?? calcCostManual(m.tokens_in, m.tokens_out, m.model, customModels);
+    const manualId = `manual-${m.date}-${m.model}-${m.tokens_in}`;
+    const dateEntry = getOrCreateDate(globalByDate, m.date);
+    dateEntry.sessions.add(manualId);
+    const modelEntry = getOrCreateModel(dateEntry, prefix);
+    modelEntry.cost_usd += cost;
+    modelEntry.tokens_in += m.tokens_in;
+    modelEntry.tokens_out += m.tokens_out;
+    modelEntry.sessions.add(manualId);
+  }
+
+  const sessions = convertToSessions(globalByDate, customModels);
+
+  const perProjectSessions = new Map<string, AISession[]>();
+  for (const [dirName, dateMap] of byProjectDir.entries()) {
+    perProjectSessions.set(dirName, convertToSessions(dateMap, customModels));
+  }
+
+  return { sessions, byProjectDir: perProjectSessions };
+}
+
+// ── Public: backward-compat wrapper ───────────────────────────────────────
+
+export function loadAISessions(customModels: CustomModelConfig[] = []): AISession[] {
+  return loadAIDataFull(customModels).sessions;
+}
+
 export function buildAIDailyData(sessions: AISession[]): AIStackedDay[] {
   if (sessions.length === 0) return [];
   const byDate = new Map(sessions.map(s => [s.date, s]));
-  const first = new Date(sessions[0].date);
+  const first = parseLocalDay(sessions[0].date);
   first.setHours(0, 0, 0, 0);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const result: AIStackedDay[] = [];
   const d = new Date(first);
   while (d <= today) {
-    const ds = d.toISOString().substring(0, 10);
+    const ds = localDay(d);
     const session = byDate.get(ds);
     result.push({
       date: ds,
