@@ -13,33 +13,33 @@ Track your coding time, project costs, daily goals, and AI usage — all inside 
 ### ⏱ Automatic Time Tracking
 Tracks active coding time per project. Detects idle periods and stops the timer automatically. No manual start/stop required.
 
-### 📊 Dashboard
+### Dashboard
 Full overview of all your projects with:
 - Daily and weekly time
 - Progress bars toward your goals
 - Streaks and language breakdown
 - Cost estimates based on hourly rate
 
-### 🍅 Pomodoro Timer
+### Pomodoro Timer
 Built-in Pomodoro timer integrated with the tracker:
 - Configurable work/break durations (default 25/5 min)
 - Status bar countdown
 - Session count per project
 - Notifications on phase completion
 
-### 🎯 Goals & Streaks
+### Goals & Streaks
 Set daily and weekly hour goals per project or globally. Get notified when you hit your target. Streak counter rewards consistent coding days.
 
-### 💰 Cost Tracking
+### Cost Tracking
 Set an hourly rate per project (or globally). Dashboard shows earnings per project and totals.
 
-### 🤖 AI Usage Tracking
+### AI Usage Tracking
 Parses Claude Code logs to show token usage and cost per model — useful for tracking AI expenses alongside coding time.
 
-### 📝 Session Notes & Tags
+### Session Notes & Tags
 Add notes and tags to sessions (e.g. `bug`, `feature`, `meeting`). Filter the dashboard by tag to analyze time by task type.
 
-### 📦 Export
+### Export
 Export all session data as **CSV** or **JSON** for billing, reporting, or external analysis.
 
 ### 🗄 Archive
