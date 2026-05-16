@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "mcp__ide__getDiagnostics",
+      "Bash(code *)",
+      "Bash(npm install *)",
+      "Bash(vsce package *)"
+    ]
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "name": "vscode-time-tracker",
+  "displayName": "VS Code Time Tracker",
+  "description": "Track active coding time, project costs, goals and AI usage",
+  "version": "0.4.0",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vscodeTracker.showDashboard",
+        "title": "VSCode Tracker: Show Dashboard"
+      },
+      {
+        "command": "vscodeTracker.configureProject",
+        "title": "VSCode Tracker: Configure Current Project"
+      },
+      {
+        "command": "vscodeTracker.logAIUsage",
+        "title": "VSCode Tracker: Log AI Usage"
+      },
+      {
+        "command": "vscodeTracker.resetToday",
+        "title": "VSCode Tracker: Reset Today Stats"
+      },
+      {
+        "command": "vscodeTracker.resetAll",
+        "title": "VSCode Tracker: Reset All Data"
+      },
+      {
+        "command": "vscodeTracker.exportCsv",
+        "title": "VSCode Tracker: Export CSV"
+      },
+      {
+        "command": "vscodeTracker.openLog",
+        "title": "VSCode Tracker: Open Log File"
+      },
+      {
+        "command": "vscodeTracker.addSessionNote",
+        "title": "VSCode Tracker: Add Note to Last Session"
+      },
+      {
+        "command": "vscodeTracker.exportJson",
+        "title": "VSCode Tracker: Export JSON"
+      },
+      {
+        "command": "vscodeTracker.pomodoroStart",
+        "title": "VSCode Tracker: Start Pomodoro"
+      },
+      {
+        "command": "vscodeTracker.pomodoroSkip",
+        "title": "VSCode Tracker: Skip Pomodoro Phase"
+      },
+      {
+        "command": "vscodeTracker.pomodoroStop",
+        "title": "VSCode Tracker: Stop Pomodoro"
+      }
+    ],
+    "configuration": {
+      "title": "VS Code Time Tracker",
+      "properties": {
+        "vscodeTracker.idleThresholdSeconds": {
+          "type": "number",
+          "default": 300,
+          "description": "Seconds of inactivity before session ends"
+        },
+        "vscodeTracker.logFilePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to log file (default: ~/.vscode-tracker/logs.json)"
+        },
+        "vscodeTracker.defaultHourlyRate": {
+          "type": "number",
+          "default": 0,
+          "description": "Default hourly rate in selected currency (0 = disabled)"
+        },
+        "vscodeTracker.currency": {
+          "type": "string",
+          "default": "EUR",
+          "enum": ["EUR", "USD", "GBP", "CHF", "JPY"],
+          "description": "Currency for cost tracking"
+        },
+        "vscodeTracker.dailyGoalHours": {
+          "type": "number",
+          "default": 0,
+          "description": "Global daily coding goal in hours (0 = no goal). All projects count toward this."
+        },
+        "vscodeTracker.weeklyGoalHours": {
+          "type": "number",
+          "default": 0,
+          "description": "Global weekly coding goal in hours (0 = no goal). All projects count toward this."
+        },
+        "vscodeTracker.enableLanguageTracking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Track time by file language/extension"
+        },
+        "vscodeTracker.pomodoroWorkMinutes": {
+          "type": "number",
+          "default": 25,
+          "description": "Pomodoro work phase duration in minutes"
+        },
+        "vscodeTracker.pomodoroBreakMinutes": {
+          "type": "number",
+          "default": 5,
+          "description": "Pomodoro break phase duration in minutes"
+        },
+        "vscodeTracker.breakReminderHours": {
+          "type": "number",
+          "default": 2,
+          "description": "Show break reminder after N continuous hours of coding (0 = disabled)"
+        },
+        "vscodeTracker.promptForNotes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-prompt for notes/tags when a session ends manually"
+        },
+        "vscodeTracker.enableAITracking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Parse Claude Code logs to show AI cost and token usage"
+        },
+        "vscodeTracker.aiCustomModels": {
+          "type": "array",
+          "default": [],
+          "description": "Custom AI model pricing definitions for non-Claude models",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Model identifier (e.g. 'gpt-4o', 'copilot')"
+              },
+              "displayName": {
+                "type": "string",
+                "description": "Human-readable name shown in dashboard"
+              },
+              "input_per_mtok": {
+                "type": "number",
+                "description": "Cost per million input tokens in USD"
+              },
+              "output_per_mtok": {
+                "type": "number",
+                "description": "Cost per million output tokens in USD"
+              },
+              "color": {
+                "type": "string",
+                "description": "Hex color for this model in charts (e.g. '#10a37f')"
+              }
+            },
+            "required": ["name", "input_per_mtok", "output_per_mtok"]
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.130",
+    "@types/vscode": "^1.74.0",
+    "typescript": "^5.0.0"
+  }
+}
