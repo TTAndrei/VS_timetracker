@@ -4,3 +4,10 @@ out/
 .vscode-test/
 *.js.map
 .aider*
+.claude/
+plan.json
+results.json
+CLAUDE.md
+images/generate_icon.py
+images/convert.py
+images/icon.jpg
