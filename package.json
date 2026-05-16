@@ -3,6 +3,15 @@
   "displayName": "VS Code Time Tracker",
   "description": "Track active coding time, project costs, goals and AI usage",
   "version": "0.4.0",
+  "publisher": "AndreiAkirov",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "categories": ["Other", "Visualization"],
+  "keywords": ["time tracking", "productivity", "pomodoro", "goals", "cost tracking"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AndreiAkirov/vscode-time-tracker"
+  },
   "engines": {
     "vscode": "^1.74.0"
   },

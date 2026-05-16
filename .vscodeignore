@@ -5,3 +5,13 @@ tsconfig.json
 **/*.map
 **/*.ts
 !out/**
+.aider*
+.aider.tags.cache.v4/**
+.claude/**
+node_modules/**
+plan.json
+results.json
+CLAUDE.md
+images/generate_icon.py
+images/convert.py
+images/icon.jpg
