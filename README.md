@@ -10,7 +10,7 @@ Track your coding time, project costs, daily goals, and AI usage — all inside 
 
 ## Features
 
-### ⏱ Automatic Time Tracking
+### Automatic Time Tracking
 Tracks active coding time per project. Detects idle periods and stops the timer automatically. No manual start/stop required.
 
 ### Dashboard
