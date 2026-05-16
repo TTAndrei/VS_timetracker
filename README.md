@@ -42,7 +42,7 @@ Add notes and tags to sessions (e.g. `bug`, `feature`, `meeting`). Filter the da
 ### Export
 Export all session data as **CSV** or **JSON** for billing, reporting, or external analysis.
 
-### 🗄 Archive
+### Archive
 Archive completed or inactive projects. Restore at any time from the Archive tab.
 
 ---
