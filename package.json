@@ -2,7 +2,7 @@
   "name": "timetracker-by-andrei",
   "displayName": "TimeTracker by Andrei",
   "description": "Track active coding time, project costs, goals and AI usage",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "publisher": "AndreiAkirov",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -19,7 +19,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/AndreiAkirov/vscode-time-tracker"
+    "url": "https://github.com/TTAndrei/VS_timetracker"
   },
   "engines": {
     "vscode": "^1.74.0"

@@ -1,4 +1,4 @@
-# TT-TimeTracker
+# TimeTracker by Andrei
 
 Track your coding time, project costs, daily goals, and AI usage — all inside VS Code.
 
@@ -114,7 +114,7 @@ All data is stored locally in `~/.vscode-tracker/`:
 - `projects.json` — project config and metadata
 - `pomodoro.json` — Pomodoro session history
 
-No data is sent to any server.
+**No data is sent to any server.**
 
 ---
 
