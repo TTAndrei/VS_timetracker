@@ -50,6 +50,13 @@ const MODEL_META: Record<string, { displayName: string; color: string }> = {
   'gpt-3':            { displayName: 'GPT-3.5',          color: '#19c37d' },
   'cursor':           { displayName: 'Cursor',            color: '#ff6f00' },
   'aider':            { displayName: 'Aider',             color: '#e91e63' },
+  'codex':            { displayName: 'Codex CLI',          color: '#000000' },
+  'gpt-5':            { displayName: 'GPT-5',              color: '#0ea5e9' },
+  'gpt-4o':           { displayName: 'GPT-4o',             color: '#0d9488' },
+  'gpt-4.1':          { displayName: 'GPT-4.1',            color: '#14b8a6' },
+  'o4':               { displayName: 'OpenAI o4',          color: '#6366f1' },
+  'o3':               { displayName: 'OpenAI o3',          color: '#818cf8' },
+  'opencode':         { displayName: 'opencode',           color: '#ef4444' },
 };
 
 const MODEL_FALLBACK = { displayName: 'Unknown', color: '#888888' };
@@ -63,6 +70,12 @@ const PRICING: Array<{ prefix: string; i: number; cw: number; cr: number; o: num
   { prefix: 'claude-sonnet-3',  i: 3,    cw: 3.75,  cr: 0.30, o: 15   },
   { prefix: 'claude-haiku-4',   i: 0.80, cw: 1.00,  cr: 0.08, o: 4    },
   { prefix: 'claude-haiku-3',   i: 0.25, cw: 0.30,  cr: 0.03, o: 1.25 },
+  { prefix: 'gpt-5',            i: 1.25, cw: 1.25,  cr: 0.125, o: 10  },
+  { prefix: 'gpt-4o',           i: 2.50, cw: 2.50,  cr: 1.25, o: 10   },
+  { prefix: 'gpt-4.1',          i: 2.00, cw: 2.00,  cr: 0.50, o: 8    },
+  { prefix: 'o4',               i: 1.10, cw: 1.10,  cr: 0.275, o: 4.4 },
+  { prefix: 'o3',               i: 2.00, cw: 2.00,  cr: 0.50, o: 8    },
+  { prefix: 'codex',            i: 1.25, cw: 1.25,  cr: 0.125, o: 10  },
 ];
 
 export function getModelPrefix(model: string): string {
@@ -241,6 +254,94 @@ function convertToSessions(byDate: Map<string, DateEntry>, customModels: CustomM
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// ── Codex CLI / extra-dir JSONL usage parsing ──────────────────────────────
+// Codex CLI rollout files and other agents store usage with varying schemas.
+// Walk the parsed JSON defensively and grab the first object that carries
+// numeric input/output token counts, plus any model string seen on the way.
+
+interface FoundUsage { input: number; cacheW: number; cacheR: number; output: number; model?: string }
+
+function deepFindUsage(o: unknown, depth = 0, model?: string): FoundUsage | null {
+  if (depth > 6 || o === null || typeof o !== 'object') return null;
+  const rec = o as Record<string, unknown>;
+  if (typeof rec.model === 'string' && !model) model = rec.model;
+
+  const num = (...keys: string[]): number => {
+    for (const k of keys) {
+      const v = rec[k];
+      if (typeof v === 'number' && isFinite(v)) return v;
+    }
+    return 0;
+  };
+  const input = num('input_tokens', 'prompt_tokens', 'inputTokens');
+  const output = num('output_tokens', 'completion_tokens', 'outputTokens');
+  if (input > 0 || output > 0) {
+    return {
+      input,
+      output,
+      cacheW: num('cache_creation_input_tokens', 'cache_write_tokens'),
+      cacheR: num('cache_read_input_tokens', 'cached_tokens', 'cached_input_tokens'),
+      model,
+    };
+  }
+  for (const v of Object.values(rec)) {
+    if (v && typeof v === 'object') {
+      const found = deepFindUsage(v, depth + 1, model);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function scanUsageJsonl(
+  dir: string,
+  byDate: Map<string, DateEntry>,
+  customModels: CustomModelConfig[],
+  depth = 0
+): void {
+  if (depth > 4) return;
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  for (const entry of entries) {
+    const full = path.join(dir, entry);
+    let stat: fs.Stats;
+    try { stat = fs.statSync(full); } catch { continue; }
+    if (stat.isDirectory()) {
+      scanUsageJsonl(full, byDate, customModels, depth + 1);
+      continue;
+    }
+    if (!entry.endsWith('.jsonl')) continue;
+    let raw: string;
+    try { raw = fs.readFileSync(full, 'utf-8'); } catch { continue; }
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let obj: any;
+      try { obj = JSON.parse(line); } catch { continue; }
+      const u = deepFindUsage(obj);
+      if (!u) continue;
+      const ts: string = obj.timestamp ?? obj.ts ?? obj.time ?? '';
+      const date = ts ? localDay(ts) : localDay(new Date(stat.mtime));
+      const model = u.model ?? 'codex';
+      const prefix = getModelPrefix(model);
+      const usageRec: Record<string, number> = {
+        input_tokens: u.input,
+        cache_creation_input_tokens: u.cacheW,
+        cache_read_input_tokens: u.cacheR,
+        output_tokens: u.output,
+      };
+      const cost = calcCost(usageRec, model, customModels);
+      const sessionId: string = obj.session_id ?? obj.sessionId ?? full;
+      const de = getOrCreateDate(byDate, date);
+      de.sessions.add(sessionId);
+      const me = getOrCreateModel(de, prefix);
+      me.cost_usd += cost;
+      me.tokens_in += u.input + u.cacheW + u.cacheR;
+      me.tokens_out += u.output;
+      me.sessions.add(sessionId);
+    }
+  }
+}
+
 // ── Public: encode a local project path to match Claude Code dir naming ────
 // Claude Code names project dirs by replacing path separators, colons,
 // underscores, and dots with hyphens.
@@ -251,7 +352,10 @@ export function encodeProjectPath(p: string): string {
 
 // ── Public: load all AI data in one pass, including per-project breakdown ──
 
-export function loadAIDataFull(customModels: CustomModelConfig[] = []): {
+export function loadAIDataFull(
+  customModels: CustomModelConfig[] = [],
+  customDirs?: { codex?: string; extra?: string[] }
+): {
   sessions: AISession[];
   byProjectDir: Map<string, AISession[]>;  // Claude encoded dir name -> sessions for that project
 } {
@@ -261,6 +365,18 @@ export function loadAIDataFull(customModels: CustomModelConfig[] = []): {
   const claudeDir = path.join(os.homedir(), '.claude', 'projects');
   if (fs.existsSync(claudeDir)) {
     walkDir(claudeDir, 0, globalByDate, customModels, byProjectDir);
+  }
+
+  const codexDir = customDirs && customDirs.codex
+    ? customDirs.codex
+    : path.join(os.homedir(), '.codex', 'sessions');
+  if (fs.existsSync(codexDir)) {
+    scanUsageJsonl(codexDir, globalByDate, customModels);
+  }
+  for (const extra of customDirs?.extra ?? []) {
+    if (extra && fs.existsSync(extra)) {
+      scanUsageJsonl(extra, globalByDate, customModels);
+    }
   }
 
   // Merge manual entries into global only (manual entries have no project association)
@@ -291,8 +407,11 @@ export function loadAIDataFull(customModels: CustomModelConfig[] = []): {
 
 // ── Public: backward-compat wrapper ───────────────────────────────────────
 
-export function loadAISessions(customModels: CustomModelConfig[] = []): AISession[] {
-  return loadAIDataFull(customModels).sessions;
+export function loadAISessions(
+  customModels: CustomModelConfig[] = [],
+  customDirs?: { codex?: string; extra?: string[] }
+): AISession[] {
+  return loadAIDataFull(customModels, customDirs).sessions;
 }
 
 export function buildAIDailyData(sessions: AISession[]): AIStackedDay[] {

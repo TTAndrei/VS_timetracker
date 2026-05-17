@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { TimeTracker } from './tracker';
 import { StatusBarManager } from './statusBar';
 import { PomodoroTimer } from './pomodoro';
+import { AIActivityTracker } from './aiActivity';
 import { openDashboard } from './dashboard';
 import {
   getLogFilePath, exportCsv, loadSegments,
@@ -12,6 +13,7 @@ import {
 let tracker: TimeTracker;
 let statusBar: StatusBarManager;
 let pomodoro: PomodoroTimer;
+let aiActivity: AIActivityTracker;
 let output: vscode.OutputChannel;
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -26,11 +28,13 @@ export function activate(context: vscode.ExtensionContext): void {
     cfg.get<number>('pomodoroWorkMinutes') ?? 25,
     cfg.get<number>('pomodoroBreakMinutes') ?? 5
   );
+  aiActivity = new AIActivityTracker();
 
   context.subscriptions.push(
     tracker,
     statusBar,
     pomodoro,
+    aiActivity,
 
     vscode.commands.registerCommand('vscodeTracker.showDashboard', () => {
       openDashboard(context, tracker);
@@ -247,4 +251,5 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   if (tracker) tracker.dispose();
   if (statusBar) statusBar.dispose();
+  if (aiActivity) aiActivity.dispose();
 }

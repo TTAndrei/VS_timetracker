@@ -87,6 +87,11 @@ export interface Strings {
   perHourCode: string;
   hoursPerDay: string;
   noPath: string;
+  aiActivityTitle: string;
+  aiActivityTool: string;
+  aiActivityToday: string;
+  aiActivityWeek: string;
+  aiActivityAll: string;
 }
 
 const en: Strings = {
@@ -175,7 +180,12 @@ const en: Strings = {
   noDataShort: 'No data',
   perHourCode: '/h code',
   hoursPerDay: 'Hours/day',
-  noPath: 'No path'
+  noPath: 'No path',
+  aiActivityTitle: 'AI assistant time',
+  aiActivityTool: 'Tool',
+  aiActivityToday: 'Today',
+  aiActivityWeek: '7d',
+  aiActivityAll: 'All'
 };
 
 const es: Strings = {
@@ -264,7 +274,12 @@ const es: Strings = {
   noDataShort: 'Sin datos',
   perHourCode: '/h código',
   hoursPerDay: 'Horas/día',
-  noPath: 'Sin ruta'
+  noPath: 'Sin ruta',
+  aiActivityTitle: 'Tiempo con asistentes IA',
+  aiActivityTool: 'Herramienta',
+  aiActivityToday: 'Hoy',
+  aiActivityWeek: '7d',
+  aiActivityAll: 'Total'
 };
 
 export function getStrings(lang: string): Strings {

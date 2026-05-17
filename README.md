@@ -17,6 +17,17 @@ Dashboard available in **English** and **Español** (auto-detects the VS Code UI
 ### Configuration
 ![Configuration](images/config.png)
 
+### Status bar
+![Status bar](images/barra_botones.png)
+
+Three quick-access buttons in the bottom-left corner:
+
+| Button | Description |
+|---|---|
+| `⏱ Project  Xm Ys` | **Session counter** — shows the active project and live session time (minutes and seconds). Updates every second. Click to open the dashboard. |
+| `🍅 Pomodoro` | **Pomodoro timer** — click to start a work session. While active, shows the countdown and switches to stop mode on click. |
+| `📝` | **Add session note** — click to tag and annotate the last recorded session (e.g. `bug`, `feature`, `meeting`) without opening the dashboard. |
+
 ---
 
 ## Features

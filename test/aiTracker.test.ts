@@ -16,8 +16,20 @@ describe('getModelPrefix', () => {
     expect(getModelPrefix('claude-sonnet-4-6')).toBe('claude-sonnet-4');
   });
 
-  it('maps gpt-4o to the gpt-4 prefix', () => {
-    expect(getModelPrefix('gpt-4o')).toBe('gpt-4');
+  it('maps gpt-4o to its dedicated prefix', () => {
+    expect(getModelPrefix('gpt-4o')).toBe('gpt-4o');
+  });
+});
+
+describe('codex / openai model prefixes', () => {
+  it('keeps gpt-5 family for codex-flavored ids', () => {
+    expect(getModelPrefix('gpt-5-codex')).toBe('gpt-5');
+  });
+  it('maps bare codex to the codex prefix', () => {
+    expect(getModelPrefix('codex')).toBe('codex');
+  });
+  it('maps dated gpt-4o ids to gpt-4o', () => {
+    expect(getModelPrefix('gpt-4o-2024')).toBe('gpt-4o');
   });
 });
 

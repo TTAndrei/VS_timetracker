@@ -44,6 +44,12 @@ export interface ManualAIEntry {
   cost_usd_override?: number; // optional: user-specified cost instead of computed
 }
 
+export interface AIActivityEntry {
+  tool: string;            // "copilot", "codex", "opencode"
+  date: string;            // YYYY-MM-DD (local)
+  active_ms: number;
+}
+
 function getTrackerDir(): string {
   const dir = path.join(os.homedir(), '.vscode-tracker');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -63,6 +69,10 @@ function getProjectConfigPath(): string {
 
 function getManualAIPath(): string {
   return path.join(getTrackerDir(), 'ai-manual.json');
+}
+
+function getAIActivityPath(): string {
+  return path.join(getTrackerDir(), 'ai-activity.json');
 }
 
 // Day bucket keyed by the user's LOCAL calendar date, not UTC. Mixing UTC
@@ -166,6 +176,25 @@ export function appendManualAIEntry(entry: ManualAIEntry): void {
   const entries = loadManualAIEntries();
   entries.push(entry);
   writeFileAtomic(getManualAIPath(), JSON.stringify(entries, null, 2));
+}
+
+export function loadAIActivity(): AIActivityEntry[] {
+  const p = getAIActivityPath();
+  if (!fs.existsSync(p)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf-8')) as AIActivityEntry[];
+  } catch {
+    return [];
+  }
+}
+
+export function appendAIActivity(tool: string, date: string, deltaMs: number): void {
+  if (deltaMs <= 0) return;
+  const list = loadAIActivity();
+  const found = list.find(e => e.tool === tool && e.date === date);
+  if (found) found.active_ms += deltaMs;
+  else list.push({ tool, date, active_ms: deltaMs });
+  writeFileAtomic(getAIActivityPath(), JSON.stringify(list, null, 2));
 }
 
 export function exportCsv(): string {

@@ -25,9 +25,11 @@ export class TimeTracker implements vscode.Disposable {
         if (e.focused) {
           this.lastActivity = new Date();
           this.startSession();
-        } else {
-          this.endSession();
         }
+        // Blur must NOT end the session. A brief alt-tab (browser, AI run,
+        // docs) would otherwise kill the session and spawn a new one on
+        // return, fragmenting time into many false segments. The idle timer
+        // ends the session after unfocusedGraceSeconds with no activity.
       }),
       vscode.window.onDidChangeActiveTextEditor(editor => {
         this.lastActivity = new Date();
@@ -219,14 +221,12 @@ export class TimeTracker implements vscode.Disposable {
   private startIdleTimer(): void {
     this.idleTimer = setInterval(() => {
       const config = vscode.workspace.getConfiguration('vscodeTracker');
-      // Window focused = user is present (watching AI agent, Copilot chat, sidebar, etc.)
-      if (vscode.window.state.focused) {
-        this.lastActivity = new Date();
-        return;
-      }
-      // Unfocused does NOT mean idle: user often watches an AI run, reads docs
-      // in a browser, or reviews output. Allow a long grace before ending the
-      // session so a 15-min AI turn is not split into fragments.
+      // Single inactivity grace, applied whether the window is focused or not.
+      // Real activity (typing, editor/terminal events, regaining focus) keeps
+      // lastActivity fresh; the long grace tolerates watching an AI run or
+      // reading docs without fragmenting the session. If there is genuinely
+      // no activity for the grace period (even with the window focused and
+      // the user away), end the session so idle time is not counted.
       const grace = (config.get<number>('unfocusedGraceSeconds') ?? 900) * 1000;
       const idleMs = Date.now() - this.lastActivity.getTime();
       if (idleMs > grace && this.sessionStart) {

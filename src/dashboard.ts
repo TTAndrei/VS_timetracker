@@ -5,6 +5,7 @@ import {
   loadSegments, exportCsv as exportCsvData, getLogFilePath,
   loadProjectConfigs, saveProjectConfig, getProjectConfig,
   readPomodoro, localDay, parseLocalDay, splitByLocalDay,
+  loadAIActivity, AIActivityEntry,
   Segment, ProjectConfig
 } from './storage';
 import { loadAIDataFull, buildAIDailyData, encodeProjectPath, AISession, AIModelUsage, AIStackedDay, CustomModelConfig } from './aiTracker';
@@ -69,6 +70,7 @@ interface DashboardData {
   aiSessions: AISession[];
   aiDailyData: AIStackedDay[];
   aiModelStats: AIModelUsage[];
+  aiActivity: AIActivityEntry[];
   aiEnabled: boolean;
   allTags: string[];
   pomodoroByProject: Record<string, number>;
@@ -303,10 +305,17 @@ function buildData(tracker?: TimeTracker): DashboardData {
   let aiModelStats: AIModelUsage[] = [];
   let perProjectAI: Record<string, ProjectAIStats> = {};
   let aiProjectRanking: Array<{ project: string; color: string; cost: number; tokIn: number; tokOut: number }> = [];
+  let aiActivity: AIActivityEntry[] = [];
+  try { aiActivity = loadAIActivity(); } catch { /* ignore */ }
 
   if (aiEnabled) {
     try {
-      const aiData = loadAIDataFull(customModels);
+      const codexDir = vsConfig.get<string>('codexSessionsDir') ?? '';
+      const extraDirs = vsConfig.get<string[]>('aiExtraLogDirs') ?? [];
+      const aiData = loadAIDataFull(customModels, {
+        codex: codexDir.length > 0 ? codexDir : undefined,
+        extra: extraDirs,
+      });
       aiSessions = aiData.sessions;
       aiDailyData = buildAIDailyData(aiSessions);
 
@@ -407,6 +416,7 @@ function buildData(tracker?: TimeTracker): DashboardData {
     aiSessions,
     aiDailyData,
     aiModelStats,
+    aiActivity,
     aiEnabled,
     allTags,
     pomodoroByProject,
@@ -558,6 +568,45 @@ export function generateDashboardHtml(lang: string = 'en', tracker?: TimeTracker
   <td>$${m.cost_usd.toFixed(2)}</td>
 </tr>`).join('');
 
+  const aiActivityHtml = (() => {
+    const rows = data.aiActivity;
+    if (!rows || rows.length === 0) return '';
+    const todayKey = localDay(new Date());
+    const weekKeys = new Set<string>();
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      weekKeys.add(localDay(d));
+    }
+    const fmt = (ms: number): string => {
+      const h = Math.floor(ms / 3600000);
+      const m = Math.floor((ms % 3600000) / 60000);
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    };
+    const byTool = new Map<string, { today: number; week: number; all: number }>();
+    for (const e of rows) {
+      const agg = byTool.get(e.tool) ?? { today: 0, week: 0, all: 0 };
+      agg.all += e.active_ms;
+      if (e.date === todayKey) agg.today += e.active_ms;
+      if (weekKeys.has(e.date)) agg.week += e.active_ms;
+      byTool.set(e.tool, agg);
+    }
+    const trs = Array.from(byTool.entries())
+      .sort((a, b) => b[1].all - a[1].all)
+      .map(([tool, a]) => `
+<tr>
+  <td>${escHtml(tool)}</td>
+  <td>${fmt(a.today)}</td>
+  <td>${fmt(a.week)}</td>
+  <td>${fmt(a.all)}</td>
+</tr>`).join('');
+    return `
+    <div class="section-title" style="margin-bottom:6px">${t.aiActivityTitle}</div>
+    <table class="model-table">
+      <thead><tr><th>${t.aiActivityTool}</th><th>${t.aiActivityToday}</th><th>${t.aiActivityWeek}</th><th>${t.aiActivityAll}</th></tr></thead>
+      <tbody>${trs}</tbody>
+    </table>`;
+  })();
+
   const paletteSwatches = PROJECT_PALETTE.map(c =>
     `<div class="swatch" style="background:${c}" onclick="pickColor('${c}')"></div>`
   ).join('');
@@ -627,7 +676,6 @@ canvas{display:block;width:100%;height:185px}
 .lang-bar-wrap{flex:1;height:10px;background:var(--vscode-widget-border);border-radius:3px;overflow:hidden}
 .lang-bar-fill{height:100%;border-radius:3px}
 .lang-pct{font-size:11px;color:var(--vscode-descriptionForeground);width:32px;text-align:right;flex-shrink:0}
-.lang-time{font-size:11px;color:var(--vscode-descriptionForeground);width:50px;text-align:right;flex-shrink:0}
 
 .section-title{font-size:10px;color:var(--vscode-descriptionForeground);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px}
@@ -810,6 +858,7 @@ canvas{display:block;width:100%;height:185px}
       <thead><tr><th>${t.thModel}</th><th>${t.thSessions}</th><th>${t.thTokIn}</th><th>${t.thTokOut}</th><th>${t.thCost}</th></tr></thead>
       <tbody>${modelTableRows}</tbody>
     </table>
+    ${aiActivityHtml}
     ${data.aiProjectRanking.length > 0 ? `
     <div class="section-title" style="margin-bottom:6px">${t.aiByProject}</div>
     <div id="ai-project-bars"></div>
@@ -1291,13 +1340,10 @@ canvas{display:block;width:100%;height:185px}
     const colors = ['#4fc3f7','#81c784','#ffb74d','#f06292','#ce93d8','#80cbc4','#ff8a65','#a5d6a7','#b39ddb','#fff176'];
     return langs.slice(0, 8).map((l, i) => {
       const pct = total > 0 ? Math.round(l.ms/total*100) : 0;
-      const h = Math.floor(l.ms/3600000), m = Math.floor((l.ms%3600000)/60000);
-      const t = h > 0 ? h+'h '+m+'m' : m+'m';
       return \`<div class="lang-row">
         <div class="lang-name">\${l.lang||'?'}</div>
         <div class="lang-bar-wrap"><div class="lang-bar-fill" style="width:\${pct}%;background:\${colors[i%colors.length]}"></div></div>
         <div class="lang-pct">\${pct}%</div>
-        <div class="lang-time">\${t}</div>
       </div>\`;
     }).join('');
   }
