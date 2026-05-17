@@ -2,7 +2,7 @@
   "name": "timetracker-by-andrei",
   "displayName": "TimeTracker by Andrei",
   "description": "Track active coding time, project costs, goals and AI usage",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "AndreiAkirov",
   "license": "MIT",
   "icon": "images/icon.png",
